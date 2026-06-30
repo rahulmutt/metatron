@@ -3,7 +3,7 @@ id: ROB-01
 title: Confident collective error is invisible to the feedback loop
 severity: critical
 category: robustness
-status: open
+status: resolved
 affected_specs: [02-consensus.md, 03-control-loop.md, 07-observability.md]
 review_verdict: CONFIRMED
 ---
@@ -46,3 +46,21 @@ loop cannot see cannot be corrected by the loop.
 - [ ] Control loop (03) escalates rather than relaxes on that composite signal.
 - [ ] Consensus (02) mandates a decorrelated red-team lane for high-blast-radius proposals.
 - [ ] Related: ROB-02 (independence), OE-01 (the error vector feeding the PID).
+
+## Resolution
+
+Adopt all three fixes: (1) treat "high subjective residue + low dispersion + low
+verification coverage" as a distinct, escalating risk signal rather than a healthy
+reading; (2) mandate a decorrelated red-team lane drawn from a deliberately different
+model population on high-blast-radius proposals; (3) surface verification coverage as a
+first-class metric in 07 alongside dispersion.
+
+Rationale: the system's only fast health signal is disagreement, not wrongness, so the
+worst failure mode — a correlated, confidently-wrong council — emits the best telemetry.
+Making coverage observable, escalating on the composite signal, and stress-testing
+confident agreement with a decorrelated source closes the single most dangerous blind
+spot.
+
+Coverage: satisfies all four checks — 07 exposes coverage and the low-dispersion/
+low-coverage composite, 03 escalates rather than relaxes on it, 02 mandates the
+decorrelated red-team lane, and the ROB-02/OE-01 links are carried into those issues.

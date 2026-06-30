@@ -3,7 +3,7 @@ id: OE-03
 title: Tier-2 JIT code synthesis trusts an undefined equivalence metric
 severity: high
 category: overengineering
-status: open
+status: resolved
 affected_specs: [05-agent-jit.md]
 review_verdict: CONFIRMED
 ---
@@ -47,3 +47,20 @@ Tier-2's trust model, not to the tiering framing or to Tier-1.
 - [ ] §05 marks Tier-2 deferred behind the existing `Tier` enum.
 - [ ] The equivalence metric is listed as a blocking prerequisite for Tier-2.
 - [ ] §5.2 vs RD-3 contradiction (cost pressure tuning the bound) is resolved.
+
+## Resolution
+
+Ship Tier-0 (LLM) + Tier-1 (exact canonical-key memo with guard + deopt-to-LLM) only.
+Tier-2 is marked deferred behind the existing `Tier` enum, the equivalence metric is
+listed as a blocking prerequisite for Tier-2, and the §5.2-vs-RD-3 contradiction is
+resolved in favor of RD-3: cost pressure does NOT tune the statistical bound.
+
+Rationale: a mechanism whose safety predicate cannot be stated cannot ship, and Tier-2's
+equivalence-of-a-stochastic-policy claim is exactly that. Tier-1 already captures most of
+the cost savings with a trivially-correct fallback, so Tier-2's unquantified marginal
+value can wait for a defined metric and measured evidence that Tier-1 hit rates are
+insufficient.
+
+Coverage: satisfies all three acceptance checks — Tier-2 deferred behind the enum, the
+equivalence metric named as a blocking prerequisite, and the cost-pressure-tuning
+contradiction resolved.

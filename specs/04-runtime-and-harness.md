@@ -72,7 +72,9 @@ Both implement the *same* reconcile contract. The orchestration plane above neve
 
 ### 2.5 Reconciliation
 
-The Execution plane is **declarative**. The configuration layer of the world-model is the **desired** set of agents and wiring (overview §3: "the taxonomy *is* state"). The backend continuously drives **actual** running agents toward desired, exactly like a Kubernetes controller drives Pods toward a Deployment spec. The diff between desired and actual becomes a **`ReconcilePlan`** of lifecycle actions (spawn / retire / rewire / restart). This is the same reconciliation pattern the whole system uses (overview §5), here applied to *processes* rather than *proposals*.
+The Execution plane is **declarative**. The configuration layer of the world-model is the **desired** set of agents and wiring (overview §3: "the taxonomy *is* state"). The backend continuously drives **actual** running agents toward desired, exactly like a Kubernetes controller drives Pods toward a Deployment spec. The diff between desired and actual becomes a **`ReconcilePlan`** of lifecycle actions (spawn / retire / rewire / restart).
+
+> **"Reconciliation" in this spec names *only* the execution loop** — the `ExecutionBackend` driving running processes (reality) to match the **committed** desired configuration. It is deliberately *not* the governance loop. The governance-level **steering loop** (`03`) — which moves *desired state* by authoring proposals that consensus accepts — is nested *around* this reconciliation loop, at a **higher altitude**: steering decides *what* the committed config ought to be; reconciliation makes *reality* match whatever is currently committed. **Convergence ownership** splits cleanly across the two altitudes: the reconciliation (execution) loop owns convergence of **reality → committed desired-state**, while the steering loop owns convergence of **desired-state → user target**. This spec uses "reconcile"/"reconciliation" exclusively in the former, execution sense.
 
 ### 2.6 Sessions, tasks, and the work
 
@@ -225,7 +227,7 @@ The split is the heart of the design decision on capability negotiation:
 |-------------------|------------------------------|
 | `structured_tool_log` | reconstruct a coarse step trace from the final diff + report; mark trace `fidelity = Coarse`. |
 | `per_step_diffs` | single cumulative diff node; no intra-session timeline. |
-| `usage_accounting` | cost/token metrics are `Unknown`; cost-control (PID `cost` dim, `03`) falls back to a *wall-clock × tier-price* estimate, flagged and reconciled later, normalized via the per-harness cost model (RD-4, §9). |
+| `usage_accounting` | cost/token metrics are `Unknown`; cost-control (steering-loop `cost` dim, `03`) falls back to a *wall-clock × tier-price* estimate, flagged and reconciled later, normalized via the per-harness cost model (RD-4, §9). |
 | `streams_progress` | no live progress; status is inferred from session liveness + final result only. |
 | `cooperative_checkpoint`/`cancel` | reconciliation must treat the session as **non-preemptible**: it defaults to the `atomic` session class (wait) or `force-cancellable` (forceful cancel + discard isolated workspace), never cooperative checkpoint (RD-3, §9). |
 
@@ -257,7 +259,7 @@ enum Check {
 }
 ```
 
-These results (`CheckOutcome`) flow back as ground-truth signal: into reputation updates (`08`), into the PID `progress` dimension (`03`), and into the JIT's stability detection (`05`). This is the determinism-first principle applied at the execution boundary: *whatever can be checked is checked, not voted on* (overview §6.2).
+These results (`CheckOutcome`) flow back as ground-truth signal: into reputation updates (`08`), into the steering-loop `progress` dimension (`03`), and into the JIT's stability detection (`05`). This is the determinism-first principle applied at the execution boundary: *whatever can be checked is checked, not voted on* (overview §6.2).
 
 ---
 
@@ -313,7 +315,7 @@ loop {
     actual  = backend.observe().await                // what is really running
     plan    = backend.reconcile(&desired, &actual)   // pure diff -> actions
     results = backend.apply(plan).await              // best-effort; partial failure OK
-    emit_telemetry(results)                          // to 07; feeds Sentinels + PID
+    emit_telemetry(results)                          // to 07; feeds Sentinels + steering loop
     // converged when reconcile() yields all NoOp; otherwise next tick re-drives the gap
 }
 ```
@@ -357,7 +359,7 @@ struct SupervisionPolicy {
 ```
 
 - A **failed session** (`Outcome::Failed`/`TimedOut`) is a *local* event: the supervisor restarts the agent's session per policy. Restart is safe for idempotent work; tools with non-transactional external effects are declared `non-restartable` and **escalate instead of blind-restarting** (RD-5, §9).
-- A **persistently failing agent** that blows its restart budget **escalates**: the failure becomes observable signal (`07`), can drive a Sentinel detection and a reputation hit (`08`), and ultimately surfaces as a control signal that the **council** may respond to by *retiring or rewiring* the agent (a `02` proposal) — closing back into the governance loop. The Execution plane never *decides* to remove an agent from desired state; it surfaces evidence and lets governance decide.
+- A **persistently failing agent** that blows its restart budget **escalates**: the failure becomes observable signal (`07`), can drive a Sentinel detection and a reputation hit (`08`), and ultimately surfaces as a control signal that the **council** may respond to by *retiring or rewiring* the agent (a `02` proposal) — closing back up into the **steering loop** (`03`), the governance loop nested around reconciliation. The Execution plane never *decides* to remove an agent from desired state; it surfaces evidence and lets governance decide.
 - **`OneForAll`/`RestForOne`** matter for *wired teams*: if a coordinator agent dies, dependent workers may need coordinated restart, exactly as in actor supervision trees.
 
 ### 4.4 Reference backend A — `RustActorBackend`
@@ -495,7 +497,7 @@ enum   CtlErr { Unsupported, NotFound, Inflight, Backend(Text) }
 | Schema-valid `StructuredReport` | **Mandatory** | governance, `07` | — |
 | Hard `cancel(Forceful)` | **Mandatory** | reconcile/preempt (§9) | — |
 | `structured_tool_log` | Optional | `07`, `05` | coarse trace from diff |
-| `usage_accounting` | Optional | PID `cost` (`03`) | wall-clock cost estimate |
+| `usage_accounting` | Optional | steering-loop `cost` (`03`) | wall-clock cost estimate |
 | `streams_progress` | Optional | `07` live view | final-result-only status |
 | `cooperative_checkpoint`/`cancel` | Optional | reconcile (§9) | non-preemptible handling |
 | `deterministic_replay` | Optional | JIT (`05`) | treat as non-deterministic |
@@ -548,7 +550,7 @@ Each session gets a `WorkspaceSpec` with an `isolation` mode. The default for co
 4. `W` receives a `TaskSpec` (goal, instructions, inputs, `acceptance = [cargo test, lint, "diff touches only src/x/**"]`, budget) and a `Context` (read-only world-view, peer `R`, `tier_hint = Tier0`).
 5. `W`'s actor invokes `claude_code.run(task, ctx)`. **Claude Code runs its own full agentic loop** — plans, edits files, runs tools, retries internally. Metatron does **not** intervene.
 6. The adapter returns a `HarnessResult`: `outcome = Completed`, a `diff`, `artifacts`, a schema-valid `report`, `telemetry = Rich`, `usage = Some{…}`.
-7. Metatron runs the `acceptance` checks independently → `check_results`. Telemetry + usage flow to `07`; check outcomes feed reputation (`08`), the PID `progress`/`cost` dims (`03`), and JIT stability detection (`05`).
+7. Metatron runs the `acceptance` checks independently → `check_results`. Telemetry + usage flow to `07`; check outcomes feed reputation (`08`), the steering-loop `progress`/`cost` dims (`03`), and JIT stability detection (`05`).
 8. The produced `diff`/artifacts become candidate progress-layer updates, which (via the normal Guardian→Genesis path) get proposed and committed. The loop closes.
 
 If instead a thin CLI harness were bound, steps 5–7 are identical *except* `telemetry = Sparse`, `usage = None`, and Observability degrades per §3.3 — **the orchestration code is unchanged**. That invariance is the whole point.
@@ -605,7 +607,7 @@ Parked, tracked, and owned here per overview §9. Most of this spec's original o
 - **`00-overview.md`** — Canonical anchor. `AgentHarness`, `ExecutionBackend`, `Tier`, `WorldModel`, `AgentId`, `Hash` are imported from §7, not redefined. Realizes the "abstract over execution" commitment (§1) and the Execution plane (§2). This spec is the "plant"/actuator in the closed loop (§5).
 - **`01-state-model.md`** — The **configuration layer** of the `WorldModel` is the **desired** input to reconciliation; the **progress layer** receives the diffs/artifacts that sessions produce. `ActualState` is the runtime projection that desired is reconciled against. Scope grants and wiring are configuration-layer state.
 - **`02-consensus.md`** — *Decides* which agents exist and how they're wired (Spawn/Retire/Rewire originate as typed proposals). The Execution plane only **actuates** accepted desired state; it never edits it. Escalated agent failures surface as evidence that may prompt new proposals.
-- **`03-control-loop.md`** — Consumes Execution-plane measurements: `check_results`→`progress`, `usage`/estimates→`cost`, failure/restart rates→signals. PID control actions become proposals that change desired configuration, which reconciliation then enacts.
+- **`03-control-loop.md`** — Consumes Execution-plane measurements: `check_results`→`progress`, `usage`/estimates→`cost`, failure/restart rates→signals. Steering-loop control actions become proposals that change desired configuration, which reconciliation then enacts.
 - **`05-agent-jit.md`** — Builds *on top of* this plane. Tier-0 (pure LLM harness) lives here; `Context::tier_hint` and `CapabilitySet::deterministic_replay` are the seams JIT plugs into. Compiler agents observe the telemetry this plane emits to detect stable behavior; deopt traps fall back to Tier-0 `AgentHarness::run`.
 - **`06-interaction-and-mailbox.md`** — `Outcome::Blocked` routes to Guardians; ambiguity surfaces to the user via the mailbox and **the affected work blocks until answered** (overview §5). The Execution plane never fabricates answers.
 - **`07-observability.md`** — Primary consumer of best-effort telemetry. **Must degrade gracefully** when a harness exposes less than `Rich` (§3.3 table). Session liveness, reconcile results, and supervision events are first-class observability inputs; Sentinels watch them.

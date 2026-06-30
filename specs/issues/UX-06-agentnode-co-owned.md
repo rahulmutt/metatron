@@ -3,7 +3,7 @@ id: UX-06
 title: AgentNode is co-owned by all five planes
 severity: low
 category: usability
-status: open
+status: resolved
 affected_specs: [01-state-model.md, 00-overview.md]
 review_verdict: SOFTENED
 ---
@@ -34,3 +34,17 @@ otherwise-sliced model rather than letting "clean slices" imply disjoint ownersh
 - [ ] `AgentNode` is presented as an explicit shared aggregate with per-plane field groups.
 - [ ] 00/01 wording no longer implies the planes own fully disjoint state.
 - [ ] Related: UX-05 (plane/role asymmetry), UX-01 (model clarity).
+
+## Resolution
+
+Document `AgentNode` as the one deliberately shared aggregate, with its fields grouped by
+owning plane, and adjust 00/01 wording so "clean slices" no longer implies disjoint plane
+ownership — it is an intentional exception to the otherwise-sliced model.
+
+Rationale: the central object is touched by every plane, which contradicts the "clean
+horizontal slices" framing if left implicit. Made explicit as one shared aggregate with
+per-concern sections, it is a fine and common design rather than an inconsistency.
+
+Coverage: satisfies both checks — `AgentNode` is presented as an explicit shared
+aggregate with per-plane field groups, and 00/01 wording no longer implies the planes own
+fully disjoint state.

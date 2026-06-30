@@ -3,7 +3,7 @@ id: ROB-07
 title: Blast-radius reversibility classifier is undefined yet gates autonomy
 severity: high
 category: robustness
-status: open
+status: resolved
 affected_specs: [06-interaction-and-mailbox.md, 00-overview.md]
 review_verdict: SOFTENED
 ---
@@ -45,3 +45,19 @@ coin-flip — but the spec must actually *define* it and pin the unknown-case de
 - [ ] Unknown reversibility defaults to block/escalate.
 - [ ] `reversible` is given an operational definition tied to proxy effects + diff revert.
 - [ ] Related: ROB-05 / UX-04 (escalation behavior when the human never answers).
+
+## Resolution
+
+Make "reversibility unknown ⇒ block/escalate" normative. Define `reversible` ≡ (no
+external side effect through the mcp-auth-proxy) AND (a revertible DAG diff); anything
+else is irreversible by default. Specify how the two objective inputs — external-effect
+and diff-revertibility — are computed, so the classifier is not a free-form LLM judgment.
+
+Rationale: an undefined default on the gate that decides whether the system acts without
+asking is the most dangerous possible setting. Two of the three inputs are objectively
+computable, so the predicate can be pinned to those, with the unknown case safely
+defaulting to escalation.
+
+Coverage: satisfies both checks — unknown reversibility defaults to block/escalate, and
+`reversible` gets an operational definition tied to proxy effects plus diff revert. The
+ROB-05/UX-04 link (what happens when the human never answers) is handled in those issues.

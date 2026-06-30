@@ -3,7 +3,7 @@ id: OE-02
 title: Hybrid post-quantum crypto mandated as the default now
 severity: medium
 category: overengineering
-status: open
+status: wontfix
 affected_specs: [00-overview.md, 08-trust-and-security.md, 09-mcp-auth-proxy.md]
 review_verdict: SOFTENED
 ---
@@ -50,3 +50,20 @@ and per-event signatures where rotation makes the quantum threat moot.
 - [ ] PQ is no longer mandated for ephemeral/transport/per-event signing.
 - [ ] A reasoned PQ posture for *permanent ledger witnesses* is recorded explicitly.
 - [ ] Migration story (08 §5) is either resolved or marked a blocking open question.
+
+## Resolution
+
+Keep the hybrid post-quantum mandate (`Ed25519+ML-DSA`, `X25519+ML-KEM`) as the default
+across all signing and transport. The PQ-as-default posture is deliberate and no spec
+change is made.
+
+Rationale: defaulting strong is the intended security stance — harvest-now-decrypt-later
+and the permanence of append-only ledger witnesses argue for one uniform PQ default
+rather than a per-path split that can be misconfigured, and the crypto-agile `SigScheme`
+enum already keeps the door open if the posture is revisited. The doubled signature size
+and per-path cost are an accepted trade-off.
+
+Coverage: as a wontfix this intentionally leaves all three acceptance checks unmet — PQ
+remains mandated for ephemeral/transport/per-event signing, no scoped ledger-only split
+is recorded, and the 08 §5 migration story is not closed here. That migration thread
+remains the one genuine residual and is tracked separately.

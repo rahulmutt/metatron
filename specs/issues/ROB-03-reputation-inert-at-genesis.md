@@ -3,7 +3,7 @@ id: ROB-03
 title: Reputation is inert exactly when stakes are highest
 severity: high
 category: robustness
-status: open
+status: resolved
 affected_specs: [08-trust-and-security.md, 02-consensus.md]
 review_verdict: CONFIRMED
 ---
@@ -42,3 +42,20 @@ uncalibrated window.
 - [ ] A burn-in / cold-start policy is specified for genesis and post-recomposition.
 - [ ] Autonomy during burn-in is gated on verification coverage, not headcount majority.
 - [ ] Related: OE-05 (reputation machinery), ROB-04 (recomposition deadlock).
+
+## Resolution
+
+Add an explicit burn-in / cold-start regime for genesis and post-recomposition: until
+calibrated samples exist, restrict autonomous commits to high-verification-coverage
+proposals (where G0 can carry the weight reputation cannot) and route low-coverage /
+high-blast-radius decisions to human escalation.
+
+Rationale: shrinkage-to-prior is the correct statistical behavior with no data, but it
+leaves the system a flat-headcount majority of uncalibrated LLMs exactly in the windows
+where the most irreversible structural decisions are made — and every recomposition
+re-enters that window. The fix is the missing compensating policy, not a change to the
+estimator.
+
+Coverage: satisfies both checks — a burn-in policy is specified for genesis and
+post-recomposition, and autonomy during burn-in is gated on verification coverage rather
+than headcount majority.

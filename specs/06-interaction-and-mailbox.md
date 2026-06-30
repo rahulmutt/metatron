@@ -15,7 +15,7 @@ Concretely, the Interaction plane is responsible for five things, all owned by *
 
 1. **Accept user INSTRUCTIONS.** Take in raw, possibly under-specified natural-language directives from the external user.
 2. **NORMALIZE an instruction into a GOAL.** Turn an instruction into a typed, schema-validated `Goal` artifact — the canonical statement of what the user wants.
-3. **Define the SETPOINT / TARGET STATE.** The normalized goal *is* the reference signal the PID controller (`03`) steers toward. Goal → setpoint is the contract between the Interaction plane and the Governance plane.
+3. **Define the SETPOINT / TARGET STATE.** The normalized goal *is* the reference signal the steering loop (`03`) steers toward. Goal → setpoint is the contract between the Interaction plane and the Governance plane.
 4. **Detect AMBIGUITY** in an instruction or in any downstream work derived from it, and resolve it under a strict two-step gate (auto-resolve from existing context, else escalate to the user).
 5. **Author typed PROPOSALS** (`Proposal`, defined in `00` §7, elaborated in `02`). Guardians are the *only* role with propose power; every user-originated change to the world-model enters governance as a Guardian-authored proposal.
 
@@ -39,7 +39,7 @@ The plane transforms raw intent into governance inputs through a fixed pipeline.
 Instruction ──normalize──▶ Goal ──derive──▶ Setpoint ──┐
  (raw NL)                  (typed)          (target     │
      │                        │              state)     ▼
-     │                        │                     PID loop (03)
+     │                        │                     steering loop (03)
      │                        ▼
      └────detect─────▶ Ambiguity ──gate──▶ {auto-resolved | Question}
                                                               │
@@ -56,7 +56,7 @@ Instruction ──normalize──▶ Goal ──derive──▶ Setpoint ──�
 |---------|---------|
 | **Instruction** | A raw natural-language directive from the external user. The only free-text input the system accepts. Immutable once received; assigned an `InstructionId`. |
 | **Goal** | The typed, schema-validated normalization of an instruction: *what the user wants*, expressed as a target over the progress layer. The canonical statement of intent. |
-| **Setpoint / Target state** | The goal projected into the controlled-variable space of the PID controller (`03`). The reference signal the closed loop steers toward. One goal yields one setpoint contribution. |
+| **Setpoint / Target state** | The goal projected into the controlled-variable space of the steering loop (`03`). The reference signal the closed loop steers toward. One goal yields one setpoint contribution. |
 | **Ambiguity** | A point in an instruction, goal, or derived unit of work where more than one materially-different interpretation is admissible, *and* the choice affects the outcome. Detected by any agent; adjudicated by Guardians. |
 | **Question** | A typed request for user input that has survived the two-step resolution gate. Surfaced via the Mailbox. Linked to the progress-layer node it gates. |
 | **Answer** | The user's typed response to a Question. Unblocks the gated work and is recorded as a new user input. |
@@ -72,7 +72,7 @@ Guardians sit at the top of the checks-and-balances cycle (`00` §3): **Guardian
 - admits an Instruction or Answer only if it falls within the submitting principal's authorization scope (which goals/budgets that user may set or answer for; scopes issued/checked per `08`), rejecting or down-scoping otherwise;
 - ingests Instructions and normalizes them to Goals;
 - maintains the mapping `Goal → Setpoint` consumed by `03`;
-- receives ambiguity reports from *any* agent in the system (a Worker hitting an unclear requirement, a Genesis member unsure how to vote, the PID controller unable to interpret an error) and runs the resolution gate (§2.3);
+- receives ambiguity reports from *any* agent in the system (a Worker hitting an unclear requirement, a Genesis member unsure how to vote, the steering loop unable to interpret an error) and runs the resolution gate (§2.3);
 - owns the Mailbox: emits Questions/Notifications, ingests Answers/Instructions;
 - authors `Proposal`s — to seed the progress layer from a new Goal, to record an Answer's resolution, to relay an escalation as a concrete decision for the user.
 
@@ -115,23 +115,30 @@ Blocking is **scoped, not global**. A Question gates a *specific* unit of work, 
 
 - the gated node (and its transitive dependents in the task graph) is in a `Blocked` state and does not advance;
 - every other node in the progress layer continues normally;
-- the PID controller (`03`) sees the blocked node as *stalled-by-design*, not as divergence or failure — a blocked node contributes to a distinct `blocked` accounting, not to the `progress` error term as drift (see §7 and `03`).
+- the steering loop (`03`) sees the blocked node as *stalled-by-design*, not as divergence or failure — a blocked node contributes to a distinct `blocked` accounting, not to the `progress` error term as drift (see §7 and `03`).
 
 When the Answer arrives, the Guardian records it (as a proposal that writes the resolution into the progress layer), the gating edge is removed, the node transitions `Blocked → Ready`, and execution resumes. The Answer is also retained as a new "existing input," so future Step-1 auto-resolutions can draw on it — answering a question once should prevent the system from ever asking an equivalent question again.
 
+**Defining `reversible` — the predicate the whole gate rests on.** Because whether the system *acts without asking* turns on this one word, it is given an operational definition rather than left to free-form judgment. An action is **`reversible` iff *both* objective conditions hold**:
+
+1. **No external side effect through the `mcp-auth-proxy`.** The gated work issues *no* call that egresses through the `mcp-auth-proxy` (`08`); every effect stays inside Metatron's own state. The proxy is the single external-egress chokepoint, so "does this touch an external system" reduces to a **lookup over the gated node's planned tool-calls**: if any planned call is routed to the proxy, this condition is **false**.
+2. **A revertible DAG diff.** The state change the work commits is expressible as a progress-layer / Merkle-DAG diff with a **computable inverse** — a `revert` proposal (`02`, §3.7) that returns the head to its prior content-address. This is decided **structurally from the diff**: an additive or last-writer-wins diff over nodes the work itself authored, with the pre-image retained, is revertible; a diff that destroys prior content without a retained pre-image, or that a later committed node already builds on, is **not**.
+
+**Anything not provably both is irreversible by default.** In particular, **if either input cannot be computed — reversibility is *unknown* — the action is classified irreversible and the gate blocks, escalating to a human.** Unknown is *never* treated as reversible. Both inputs are objective (proxy routing is a lookup over planned calls; diff-revertibility is a structural property of the diff), so the classifier is **not** free-form LLM judgment: an LLM may *propose* a tier, but the predicate above is authoritative and fails safe. The **"a user Answer always wins over a late auto-resolution" revert** (§3.4) rests on this same predicate — an auto-resolution can only have committed in the user's absence if it was `reversible` here, so its revert path is always well-defined.
+
 **Timeouts are tiered by blast radius.** A `Question` must not block its node *forever* when the work is cheap and recoverable, but must *never* be auto-defaulted when the work is dangerous. The deadline behavior is therefore tiered by the blast radius of the gated work:
 
-- **Low-stakes / reversible work** — work that is cheap, reversible, and below a significant-budget threshold **proceeds after a deadline** using the Step-1 best auto-resolution candidate (the one whose `confidence` sat just below the auto-resolve threshold). It proceeds **reversibly** and **emits a Notification** so the user can see, and undo, what was chosen in their absence. Liveness is preserved.
-- **High-stakes work** — work that is **constitutional** (`00` §6), **irreversible**, or carries **significant budget** **blocks indefinitely** until a human answers. There is no auto-default here; the safest reading of the bootstrap ("do not proceed until answered") is honored exactly where it matters.
+- **Low-stakes / reversible work** — work that is cheap, `reversible` (by the predicate above), and below a significant-budget threshold **proceeds after a deadline** using the Step-1 best auto-resolution candidate (the one whose `confidence` sat just below the auto-resolve threshold). It proceeds **reversibly** and **emits a Notification** so the user can see, and undo, what was chosen in their absence. Liveness is preserved.
+- **High-stakes work** — work that is **constitutional** (`00` §6), **irreversible** (by the predicate above, *including the unknown-reversibility case*), or carries **significant budget** is **never silently auto-defaulted**. It follows the uniform **bounded escalation-timeout** policy: the Question is held for a bounded escalation window and, on expiry, re-routed up the cross-user precedence order (§3.7) to the next authorized principal. If the window elapses with no authoritative Answer, the gated node **holds and degrades safely** — it stays `Blocked`, sheds its dependent work cleanly, and emits a `Warning` Notification — but **never proceeds on the irreversible action**. There is no auto-default that *acts*: the only fallback is to stay safely stalled, honoring the bootstrap ("do not proceed until answered") without dead-ending availability for the rest of the system. No high-stakes path blocks *indefinitely* — every wait is bounded and resolves to this defined safe fallback.
 
-The blast-radius classification is derived from the gated node's properties (reversibility, budget magnitude, whether it touches kernel/constitutional state) and is recorded on the `Question` so the tier is auditable.
+The blast-radius tier is derived **mechanically** from the gated node — (i) the `reversible` predicate above, (ii) budget magnitude against the significant-budget threshold, (iii) whether it touches kernel/constitutional state — and is recorded on the `Question` so the tier is auditable. Unknown on any objective input resolves to high-stakes.
 
 ### 2.5 Escalations as a Mailbox boundary
 
 The Mailbox is the *single* place internal escalations become human-visible:
 
 - **Consensus escalations (`02`).** When the council cannot reach the acceptance threshold, or dispersion is high enough that deliberation does not converge, the decision escalates. A Guardian renders the deadlock as a user-facing item: a Question if a human choice can break it, or a Notification if it is merely informational.
-- **Control-loop escalations (`03`).** When the PID controller detects an error it cannot drive down with available control actions (e.g. the goal is infeasible under the cost budget, or progress has flatlined), it escalates. A Guardian renders this as a Question ("relax the deadline or cut scope?") or Notification.
+- **Control-loop escalations (`03`).** When the steering loop detects an error it cannot drive down with available control actions (e.g. the goal is infeasible under the cost budget, or progress has flatlined), it escalates. A Guardian renders this as a Question ("relax the deadline or cut scope?") or Notification.
 
 In both cases the Interaction plane is doing its job: translating an internal condition into the typed, scarce, blocking-or-not vocabulary the user understands.
 
@@ -163,7 +170,7 @@ Note normalization and ambiguity resolution are *interleaved*, not strictly sequ
 
 ### 3.2 Goal → Setpoint derivation
 
-The Goal is the user-facing statement; the **Setpoint** is its projection into the PID controller's controlled-variable space (`03`). The Guardian computes and maintains this projection:
+The Goal is the user-facing statement; the **Setpoint** is its projection into the steering loop's controlled-variable space (`03`). The Guardian computes and maintains this projection:
 
 - **Progress target.** The goal's completion criteria define the `progress` reference: `progress_error = 0` exactly when the goal's acceptance predicate holds over the progress layer.
 - **Constraints become bounds.** Budget/deadline/quality constraints on the Goal map onto the `cost` and `latency` reference bands of the `ErrorVector` (`00` §7).
@@ -260,10 +267,10 @@ Clustering uses a **conservative similarity threshold**: it is biased toward *no
 A new Instruction may conflict with intent the user already expressed, or with already-committed progress (`01`), or with another user's instruction on a shared goal. The Guardian **routes by the magnitude of the conflict** rather than treating every conflict the same way:
 
 - **Small conflict → treat as an ambiguity.** The discrepancy is minor / locally reconcilable: route it into the two-step gate (§2.3) as an `AmbiguityReport` and let Step-1 context (or, failing that, a Question) settle it.
-- **Medium conflict → a new Goal version.** The instruction is a genuine revision of intent: mint a **new `Goal` version** (§3.2), producing a clean **setpoint step** at a `LogicalTime` boundary that feeds the PID controller (`03`) as a reference change rather than a mid-flight mutation.
+- **Medium conflict → a new Goal version.** The instruction is a genuine revision of intent: mint a **new `Goal` version** (§3.2), producing a clean **setpoint step** at a `LogicalTime` boundary that feeds the steering loop (`03`) as a reference change rather than a mid-flight mutation.
 - **Large conflict → a proposal to revert.** The instruction contradicts committed progress so fundamentally that the right action is to undo it: author a **proposal to revert** (`02`) the offending committed state, which the Genesis council disposes of like any other proposal.
 
-Cross-user conflicts on a *shared* goal use the same magnitude routing, but *which* user's instruction prevails when several authorized principals contradict each other is a governance/values decision deferred to §6.
+**Cross-user precedence — deterministic, deadlock-free.** Cross-user conflicts on a *shared* goal use the same magnitude routing. To guarantee that two authorized principals can never *mutually deadlock* — each blocking on the other, or each holding a contradictory answer to the same shared Question (§3.6) — a **deterministic precedence order** breaks every tie: **(1) higher authorization rank wins** (the `rank` carried on each principal's `AuthorizationScope`, issued per `08`); **(2) on equal rank, first-committed-wins** — the instruction whose enclosing artifact reached an earlier `LogicalTime` boundary (`01`) prevails. This order is total and computable, so arbitration always terminates with a single winner rather than a standoff. The losing instruction is not discarded: it is surfaced to its submitter as a Notification and may re-enter as a fresh instruction. This precedence is a **liveness floor**, not the last word on *values*: a richer values-weighted arbitration policy may later refine *which* intent **should** prevail (§6), but it may only override the floor, never reintroduce a deadlock.
 
 ---
 
@@ -289,6 +296,7 @@ struct AuthorizationScope {
     goals: GoalSelector,         // which goals this user may set / revise / answer for
     budget_ceiling: Budget,      // max budget this user may commit via a goal/answer
     may_answer: QuestionSelector,// which questions this user may authoritatively answer
+    rank: AuthorizationRank,     // total-ordered precedence for cross-user tie-break (§3.7); issued per 08
 }
 
 /// Raw, immutable user directive — the only free text the system accepts.
@@ -311,7 +319,7 @@ struct Goal {
     provenance: Text,            // original instruction text, retained
 }
 
-/// The goal's projection into the PID controlled-variable space (consumed by 03).
+/// The goal's projection into the steering loop's controlled-variable space (consumed by 03).
 struct Setpoint {
     goal: GoalId,
     progress_target: ProgressRef,   // acceptance predicate handle
@@ -362,9 +370,12 @@ enum QuestionState  { Draft, Open, Answered, Closed(CloseReason) }
 enum CloseReason    { Answered, AutoResolvedLate, Superseded, Withdrawn }
 
 /// Blast-radius tier of the gated work; decides timeout behavior (§2.4).
+/// Derived mechanically; `reversible` is the objective predicate of §2.4
+/// (no mcp-auth-proxy egress AND a revertible DAG diff). Unknown reversibility => HighStakes.
 enum BlastRadius {
     LowStakesReversible, // proceeds after a deadline w/ Step-1 best candidate, reversibly + Notification
-    HighStakes,          // constitutional / irreversible / significant-budget: BLOCKS indefinitely
+    HighStakes,          // constitutional / irreversible (incl. unknown) / significant-budget:
+                         // bounded escalation-timeout -> hold + degrade safely, never auto-proceed (§2.4)
 }
 
 /// The user's reply. Unblocks the gated node and becomes a new "existing input."
@@ -401,7 +412,7 @@ trait GuardianInteraction {
     /// Normalize an instruction into a typed Goal (output is schema-validated).
     fn normalize(&self, instr: InstructionId) -> Goal;
 
-    /// Derive/maintain the PID setpoint from a goal (consumed by 03).
+    /// Derive/maintain the steering setpoint from a goal (consumed by 03).
     fn setpoint(&self, goal: GoalId) -> Setpoint;
 
     /// STEP 1 of the gate: can existing inputs IN SCOPE FOR THE GATED GOAL
@@ -488,9 +499,9 @@ A design review resolved most of this plane's original open questions. The follo
 
 1. **Multi-user is first-class (locked).** Metatron supports **concurrent external users from the start**, not a single intent thread. Each principal has its own intent thread, **per-user mailbox** (§3.3), and **authorization scopes** over which goals/budgets it may set or answer for (§2.2, §4.1). The Guardian state machine (§3.1) and the open-question index (§3.3) carry an explicit **tenancy / principal dimension** (`ExternalUserId`), and Step-1 "existing inputs" are **scoped to the relevant user/goal** (§2.3). Conflicting instructions across users on a *shared* goal are routed per §3.7, with the *arbitration policy* itself still open (§6).
 2. **External identity is a separate principal type.** `ExternalUserId` is **not** an `AgentId` (the latter is internal, public-key-derived; `00` §7). The **authentication mechanism, identity-to-session binding, and scope issuance are owned by `08-trust-and-security.md`**; this plane *assumes* an authenticated `ExternalUserId` and a resolved set of per-user authorization scopes, and consumes them to admit instructions/answers (§2.2, §4.4).
-3. **Timeouts are tiered by blast radius (locked via the liveness fork).** Low-stakes / reversible blocked work **proceeds after a deadline** using the Step-1 best auto-resolution candidate — *reversibly*, emitting a Notification. High-stakes work (constitutional, irreversible, significant budget) **blocks indefinitely** until a human answers. See §2.4 and `BlastRadius` (§4.2).
+3. **Timeouts are tiered by blast radius (locked via the liveness fork).** Low-stakes / reversible blocked work **proceeds after a deadline** using the Step-1 best auto-resolution candidate — *reversibly*, emitting a Notification. High-stakes work (constitutional, irreversible — *including the unknown-reversibility case* — or significant budget) is **never silently auto-defaulted**: it follows a **bounded escalation-timeout** and, on expiry, **holds and degrades safely** (stays `Blocked`, never proceeds on the irreversible action) rather than blocking forever. `reversible` is defined operationally in §2.4 (no `mcp-auth-proxy` egress **and** a revertible DAG diff; unknown ⇒ irreversible). See §2.4 and `BlastRadius` (§4.2).
 4. **Near-identical questions are coalesced.** `AmbiguityReport`s are clustered by semantic similarity **through the decorrelated council**, **one** Question is raised per cluster, and its single Answer **fans back** to every gated node (and every affected user's mailbox). A **conservative clustering threshold** bounds the false-merge risk (§3.6).
-5. **The auto-resolve threshold is per-goal tunable and PID-coupled.** Step 1's confidence threshold is set **per goal** and **tightened when divergence is already high** (coupled to the PID controller, `03`), trading user-interruption rate against silent-misinterpretation rate (relates to calibration in `08`).
+5. **The auto-resolve threshold is per-goal tunable and steering-loop-coupled.** Step 1's confidence threshold is set **per goal** and **tightened when divergence is already high** (coupled to the steering loop, `03`), trading user-interruption rate against silent-misinterpretation rate (relates to calibration in `08`).
 6. **A user Answer always wins over a late auto-resolution.** The human is authoritative: if an Answer races a late Step-1 auto-resolution on the same Question, the Answer is applied and any reversible auto-resolution is reverted in its favor (§3.4).
 7. **Instruction-vs-committed-state is routed by magnitude.** Small conflict → treat as an ambiguity (gate it, §2.3); medium → a new `Goal` version (setpoint step feeding `03`, §3.2); large → a proposal to **revert** (`02`). See §3.7.
 
@@ -500,7 +511,7 @@ A design review resolved most of this plane's original open questions. The follo
 
 Per `00` §9, the genuinely-open items are parked here, not silently decided. (Most of this plane's original open questions are now resolved — see §5.)
 
-1. **Cross-user conflict arbitration policy.** When **multiple authorized users issue contradictory instructions on the *same* goal**, §3.7 fixes the *mechanism* (route by magnitude), but *which* principal's intent prevails — seniority, scope precedence, explicit ownership, council adjudication, or a values-weighted rule — is a **governance/values-open** question. Parked.
+1. **Cross-user conflict arbitration *values* policy.** §3.7 now fixes both the *mechanism* (route by magnitude) and a **deterministic precedence floor** (authorization rank, then first-committed-wins) so the system can **never mutually deadlock**. What remains open is the *values* layer above that floor: whether a richer rule — explicit ownership, council adjudication, or a values-weighted scheme — *should* override the default precedence in some cases. Any such refinement must preserve the deadlock-free guarantee. **Governance/values-open.** Parked.
 2. **Calibrating the question-clustering threshold.** The conservative similarity threshold (§3.6) **bounds but does not eliminate** the false-merge risk of LLM-based clustering (two genuinely-different ambiguities merged, so one is answered wrong). Where exactly to set it is **empirical** — it must be tuned against observed false-merge and over-asking rates (`07`). Parked.
 
 ---
@@ -512,7 +523,7 @@ Per `00` §9, the genuinely-open items are parked here, not silently decided. (M
 | **`00-overview.md`** | Canonical anchor. Guardian role (§3), Mailbox glossary entry, plane table (§2), the closed-loop diagram (§5: "Guardians surface a question … the affected work blocks until answered"), and the canonical types (`Proposal`, `AgentId`, `Hash`, `LogicalTime`, `ErrorVector`) all originate there and are reused verbatim. |
 | **`01-state-model.md`** | The Interaction plane *writes into the progress layer* via proposals. The canonical "open question" object is a **progress-layer node** (`01` lists "open questions" as progress-layer content); the Mailbox `Question` is its user-facing projection, linked by the `gates: Hash` edge. Blocking/unblocking flips that node's `Blocked ↔ Ready` state. `LogicalTime` ordering comes from here. |
 | **`02-consensus.md`** | Guardians *author* the typed `Proposal`s that this plane produces (goal seeding, answer resolutions, escalation relays); the Genesis council disposes. **Consensus escalations** (deadlock, high dispersion) surface to the user through this plane's Mailbox as Questions/Notifications. The Step-1 auto-resolve "consult the council" query is a decorrelated read using `02` machinery. |
-| **`03-control-loop.md`** | The **Goal defines the setpoint/target state** the PID controller steers toward (§3.2). The Setpoint schema (§4.1) is produced here and consumed there. **Control-loop escalations** (infeasible goal, flatlined progress) surface through the Mailbox. Blocked nodes are reported to `03` as *stalled-by-design*, kept distinct from the `divergence`/`progress` error terms so blocking does not look like failure. |
+| **`03-control-loop.md`** | The **Goal defines the setpoint/target state** the steering loop steers toward (§3.2). The Setpoint schema (§4.1) is produced here and consumed there. **Control-loop escalations** (infeasible goal, flatlined progress) surface through the Mailbox. Blocked nodes are reported to `03` as *stalled-by-design*, kept distinct from the `divergence`/`progress` error terms so blocking does not look like failure. |
 | **`04-runtime-and-harness.md`** | Workers (running under harnesses) are the most frequent *raisers* of `AmbiguityReport`s (§3.5). A raised ambiguity pauses that Worker's unit of work; the Answer/resolution resumes it. |
 | **`07-observability.md`** | The Mailbox logs (§3.3) and question lifecycle (§3.4) are a telemetry source: interruption rate, auto-resolve hit-rate, mean time-to-answer, and blocked-node counts are observability signals. Sentinels may watch for Guardians over-interrupting the user (a drift signal). |
 | **`08-trust-and-security.md`** | Owns external identity & authorization (§5 decision 2): how `ExternalUserId` authenticates, how its session binds, how per-user **authorization scopes** are issued, and how answer-authorization is checked — the external-vs-internal trust boundary. This plane *assumes* an authenticated `ExternalUserId` and resolved scopes and consumes them; `08` defines how they come to be. The Mailbox is the system's outermost trust boundary. |

@@ -72,19 +72,33 @@ The tier enum is canonical (`00-overview.md` §7):
 enum Tier {
     Tier0Interpreter,   // pure LLM harness          — the interpreter
     Tier1Memoized,      // learned input->action map  — the inline cache
-    Tier2Compiled,      // synthesized deterministic  — the optimizing JIT
+    Tier2Compiled,      // synthesized deterministic  — the optimizing JIT   [DEFERRED, see below]
 }
 ```
+
+> **Shipping scope (v1): Tier 0 + Tier 1 only. Tier 2 is DEFERRED.** The `Tier`
+> enum keeps the `Tier2Compiled` variant so the optimizing tier can slot in later
+> without a schema change, but **no Tier-2 artifact is synthesized, promoted, or
+> executed in v1.** The reason is in §6.3: Tier 2 *generalizes* a **stochastic**
+> Tier-0 policy into deterministic code, and the trust machinery that would make
+> that safe — a stated `EquivalenceMetric` between a distribution and a function,
+> and the `EquivalenceCertificate`/"safe by construction"/guard-"soundness" claims
+> built on it — **is not yet achievable** (§8a). Tier 1 (exact canonical-key
+> memoization with a guard and deopt-to-LLM) captures most of the cost savings
+> behind a **trivially-correct fallback**, with none of that exposure. Tier 2 ships
+> only once its **blocking prerequisites** (§3.5) are met. Throughout this spec,
+> Tier-2 mechanisms are specified as the *intended* design of the deferred tier, not
+> as v1 behavior.
 
 | Tier | Mechanism | Marginal cost | Latency | Determinism | When valid |
 |---|---|---|---|---|---|
 | **Tier 0 — Interpreter** | `AgentHarness::run` — a full LLM session | High (tokens, $$) | Seconds | Stochastic | Always. The universal fallback. |
 | **Tier 1 — Memoized** | (Possibly polymorphic) inline cache: canonical input → cached action, learned from observed *stable* behavior | ~0 tokens; cache lookup + guard eval | Sub-ms on hit; deopts to Tier 0 on miss | Deterministic per cache entry | Input has been seen and behavior was stable across observations |
-| **Tier 2 — Compiled** | Synthesized deterministic artifact (decision tree / rule set / typed transform / small program) executing the regularity directly | ~0 tokens; native execution | Microseconds | Deterministic by construction | Behavior is *provably or empirically regular* over an input region, validated by equivalence checking |
+| **Tier 2 — Compiled** *(DEFERRED, v1)* | Synthesized deterministic artifact (decision tree / rule set / typed transform / small program) executing the regularity directly | ~0 tokens; native execution | Microseconds | Deterministic by construction | Behavior is *provably or empirically regular* over an input region, validated by equivalence checking — **blocked in v1 until §3.5's prerequisites are met** |
 
 The tiers form a **total fallback order**: `Tier2 ⊐ Tier1 ⊐ Tier0`. A deopt always moves *down* this order; a promotion always moves *up*. Tier 0 is the floor and can never deopt (there is nothing below the interpreter).
 
-> **Tier 1 vs Tier 2, sharpened.** Tier 1 *remembers* what the agent did (lookup over a finite observed table; novel input = guaranteed miss = deopt). Tier 2 *generalizes* what the agent does (a synthesized function with a domain; novel-but-in-domain input can be answered without ever having been seen, which is exactly why Tier 2 needs stronger correctness machinery — §6). This is the inline-cache vs optimizing-compiler distinction.
+> **Tier 1 vs Tier 2, sharpened.** Tier 1 *remembers* what the agent did (lookup over a finite observed table; novel input = guaranteed miss = deopt). Tier 2 *generalizes* what the agent does (a synthesized function with a domain; novel-but-in-domain input can be answered without ever having been seen, which is exactly why Tier 2 needs stronger correctness machinery — §6). This is the inline-cache vs optimizing-compiler distinction — and it is precisely why **Tier 1 ships in v1 and Tier 2 is deferred**: Tier 1's worst case is a guaranteed-correct deopt, whereas Tier 2's correctness rests on an equivalence claim that cannot yet be stated for a stochastic policy (§6.3, §8a).
 
 ### 2.3 Decision sites and canonicalization
 
@@ -132,7 +146,7 @@ Guards compose: a compiled policy carries a **guard set**, and the fast path is 
 Per `00-overview.md` §3, **doing** and **watching** are different powers held by different agent classes. The JIT preserves this:
 
 - **Compiler** (`Optimize`): the JIT compiler thread. *Observes* stable behavior at a decision site, *synthesizes* a Tier-1 or Tier-2 policy, *installs* guards, and *proposes* the promotion. Runs **off the hot path**, asynchronously, exactly like a background compiler thread. The Compiler **builds** but does not unilaterally **decide** (see §5.4 authority).
-- **Sentinel** (`Watch`): the recompilation-policy brain + the safety monitor. *Monitors* trap rates, deopt rates, drift, and shadow-equivalence; *decides* when behavior is hot+stable enough to *request* compilation and when a tier has gone stale and must be *demoted*. Sentinels also feed the PID `divergence` signal and reputation (`08`).
+- **Sentinel** (`Watch`): the recompilation-policy brain + the safety monitor. *Monitors* trap rates, deopt rates, drift, and shadow-equivalence; *decides* when behavior is hot+stable enough to *request* compilation and when a tier has gone stale and must be *demoted*. Sentinels also feed the steering-loop `divergence` signal and reputation (`08`).
 
 > The Compiler is the *muscle*; the Sentinel is the *governor*. A Compiler that could also decide when to compile and never be second-guessed would be a JIT with no deopt policy — the failure mode this separation prevents. Conversely a Sentinel never synthesizes code; it only watches and signals.
 
@@ -186,7 +200,7 @@ struct ObservationRecord {
     site: DecisionSiteId,
     samples: Vec<Observation>,        // rolling window
     invocation_rate: f32,             // hotness (per unit logical time)
-    cost_per_invocation: CostStats,   // feeds G1 / PID cost link (§5.2)
+    cost_per_invocation: CostStats,   // feeds G1 / steering-loop cost link (§5.2)
     stability: StabilityStats,        // see §3.3
 }
 
@@ -246,9 +260,28 @@ Execution at Tier 1: canonicalize → if `key` is in `key_index` **and** all gua
 
 A PIC (k>1) just dispatches over clusters: pick the cluster whose `domain` contains `features`; if none contains it → `NoveltyGuard` fires → deopt. Megamorphic sites are never built (§3.3); a PIC whose `arity` exceeds `k_max` (default 4–6) with no dominant cluster is treated as effectively megamorphic and demoted to Tier 0 (§7 RD-8).
 
-### 3.5 Tier-2 synthesis (the optimizing compiler)
+### 3.5 Tier-2 synthesis (the optimizing compiler) — DEFERRED
 
-Where the stable behavior is *regular* — not merely repetitive — the Compiler attempts to synthesize a deterministic artifact that *generalizes* the behavior over a guarded domain, rather than merely tabulating it:
+> **Deferred in v1.** This subsection specifies the *intended* design of the Tier-2
+> optimizing tier; **none of it executes in v1.** Tier 2 ships only once both
+> **blocking prerequisites** are met:
+>
+> 1. **A stated equivalence metric exists.** A defined, validated `EquivalenceMetric`
+>    (§6.3, §8a) for comparing a **stochastic** Tier-0 policy to **deterministic**
+>    synthesized code — including the distance, the threshold, and whether the
+>    comparison is on action or downstream outcome. Without it, the
+>    `EquivalenceCertificate` certifies nothing falsifiable, and the "safe by
+>    construction" / guard-"soundness" claims (§6.1, §6.3) **cannot be made** for a
+>    Tier-2 artifact.
+> 2. **Measured Tier-1 hit rates prove insufficient.** Tier-2's marginal value over
+>    Tier-1 must be demonstrated from production data — i.e. that exact canonical-key
+>    memoization (§3.4) leaves materially uncaptured cost savings on real hot,
+>    stable sites. Until measured, Tier 1's trivially-correct fallback is preferred
+>    over Tier 2's unquantified, higher-risk generalization.
+>
+> Both gates are necessary; meeting one is not enough.
+
+Where the stable behavior is *regular* — not merely repetitive — the (deferred) Tier-2 Compiler would attempt to synthesize a deterministic artifact that *generalizes* the behavior over a guarded domain, rather than merely tabulating it:
 
 ```rust
 enum CompiledArtifact {
@@ -293,7 +326,7 @@ struct DeoptEvent {
 }
 ```
 
-Because deopt always lands on a tier that is *at least as general and correct* as the one it left (ultimately Tier 0, which is always correct-by-definition since it *is* the agent), **a deopt can never make the answer worse** — it can only cost more. This is the formal sense in which the JIT is *safe by construction*: the worst case of every optimization is "we paid Tier-0 cost anyway," never "we returned a wrong answer."
+Because deopt always lands on a tier that is *at least as general and correct* as the one it left (ultimately Tier 0, which is always correct-by-definition since it *is* the agent), **a deopt can never make the answer worse** — it can only cost more. This is the formal sense in which the JIT is *safe by construction* — but note the precise scope of that claim. It holds whenever the fast path is *only ever taken on inputs the guard can soundly admit*, which is the case for **Tier 1**: an exact-match hit replays an observed Tier-0 action, and everything else traps, so the worst case is genuinely "we paid Tier-0 cost anyway," never "we returned a wrong answer." It does **not** hold unconditionally for **Tier 2**, whose generalization can silently diverge on a novel-but-in-domain input where no guard fires — a failure caught only *probabilistically* by canary sampling (§6.2), not *prevented* by construction. The "safe by construction" guarantee is therefore real for the v1 scope (Tier 0 + Tier 1) and is one of the things a deferred Tier 2 would have to re-establish under a stated equivalence metric (§6.3, §8a).
 
 ### 3.7 On-stack replacement (mid-task tier swap)
 
@@ -364,7 +397,7 @@ struct TierHealth {
     trap_rate: f32,          // deopts / invocations
     drift: f32,              // §5.3
     shadow_divergence: f32,  // §6.2: 1 - equivalence_rate on canary sample
-    cost_saved: Cost,        // realized G1 benefit (feeds PID cost dimension)
+    cost_saved: Cost,        // realized G1 benefit (feeds steering-loop cost dimension)
 }
 ```
 
@@ -403,18 +436,18 @@ Promote a decision site **up** a tier when all of:
 
 Hotness alone is insufficient (a hot but unstable site stays Tier 0); stability alone is insufficient (a stable but cold site is not worth a compile); the *product*, weighted by cost pressure, is the promotion signal. This is tiered compilation: cheap Tier 1 triggers readily and broadly; expensive Tier 2 triggers rarely and only where the equivalence bar is met.
 
-### 5.2 The economic link to the PID cost dimension (explicit)
+### 5.2 The economic link to the steering-loop cost dimension (explicit)
 
 This is the load-bearing motivation. Per `00-overview.md` §7 and `03-control-loop.md`, the controller steers on an `ErrorVector` whose `cost` component is *budget pressure*. **Harness sessions are the dominant cost.** Therefore:
 
-> When the PID controller's `cost` error rises, it raises **cost pressure**, which **lowers the Sentinel's promotion thresholds** — making the JIT compile hot, stable paths more aggressively to drive the marginal cost of those decisions toward zero. Compilation is the execution plane's *primary actuator for the cost dimension.* The Sentinel turns "we are over budget" into "compile the hot paths."
+> When the steering loop's `cost` error rises, it raises **cost pressure**, which makes the Sentinel **prioritize and schedule compilation of already-eligible hot, stable paths more aggressively** — driving the marginal cost of those decisions toward zero. Crucially, cost pressure modulates *whether and which* eligible sites get compiled and how eagerly the Compiler is dispatched; it **does NOT tune the statistical stability/equivalence bound** that decides whether a site is *safe* to compile (§7 RD-3). The safety bar is fixed; cost pressure only reorders the queue of sites that have already cleared it. Compilation is the execution plane's *primary actuator for the cost dimension.* The Sentinel turns "we are over budget" into "compile the hot paths that already qualify."
 
-Conversely, when cost pressure is low and the system is idle, there is little reason to risk a compile — the thresholds rise, and the JIT stays conservative. The realized savings (`TierHealth.cost_saved`) flow back through observability into the PID `cost` estimate, **closing the loop** (Principle 5): the controller can *see* the JIT working and ease cost pressure accordingly. This makes the agent-JIT a genuine control actuator, not a side optimization — it is *how* the governance plane spends less.
+Conversely, when cost pressure is low and the system is idle, there is little reason to spend on a compile — the Sentinel simply defers eligible candidates and the JIT stays quiescent. The eligibility bound is unchanged either way. The realized savings (`TierHealth.cost_saved`) flow back through observability into the steering-loop `cost` estimate, **closing the loop** (Principle 5): the controller can *see* the JIT working and ease cost pressure accordingly. This makes the agent-JIT a genuine control actuator, not a side optimization — it is *how* the governance plane spends less.
 
 ```
-PID cost error ↑ ──▶ cost pressure ↑ ──▶ Sentinel thresholds ↓ ──▶ more promotions
-        ▲                                                              │
-        └──────────────  cost_saved (realized G1 benefit) ◀───────────┘
+steering-loop cost error ↑ ──▶ cost pressure ↑ ──▶ Sentinel prioritizes eligible sites ──▶ more promotions
+        ▲                                        (statistical bound unchanged — RD-3)        │
+        └────────────────────────  cost_saved (realized G1 benefit) ◀──────────────────────┘
 ```
 
 ### 5.3 Demotion / deopt — when to compile down
@@ -454,6 +487,16 @@ Guards are **conservative** (§2.4): they fire whenever validity cannot be posit
 
 Equivalently, the guard set must **over-approximate** the unsafe region: it may trap unnecessarily (cost), but must never *fail to trap* on an input where the compiled answer could diverge (correctness). The `NoveltyGuard` is the backstop: anything the compiler did not observe densely enough is OOD by default and traps to Tier 0. **Unknown ⇒ trap.**
 
+> **Where soundness is actually establishable today.** This soundness statement is
+> achievable for **Tier 1**: an exact-match memo only answers on a `CanonKey` it has
+> *literally observed*, so a hit replays a recorded Tier-0 action and a miss traps —
+> there is no in-domain generalization to be wrong about. It is **not yet
+> establishable for Tier 2**: a synthesized function answers *novel-but-in-domain*
+> inputs it never saw, so "`P(x)` is within tolerance of the Tier-0 action" presumes
+> the very `EquivalenceMetric` between a stochastic policy and deterministic code
+> that does not yet exist (§6.3, §8a). This gap — soundness provable for Tier 1, only
+> aspirational for Tier 2 — is why Tier 2 is deferred (§2.2, §3.5).
+
 ### 6.2 Shadow / canary execution
 
 Before *and during* promotion, the system runs the compiled policy **alongside** Tier 0 to empirically verify equivalence:
@@ -489,7 +532,19 @@ struct EquivalenceCertificate {
 }
 ```
 
-The certificate is content-addressed and referenced by the `TierChange` (§4.4), so the basis for every promotion is itself in the Merkle history and re-checkable. The *contract* of equivalence is committed (§7 RD-2): the compiled output must lie in the **high-probability support of Tier-0's action distribution** under the `EquivalenceMetric`, validated by shadow execution — not an exact point match, since Tier-0 is itself a distribution. The *precise* metric and threshold (exact action vs. downstream outcome, what distance) remain a research question (§8a).
+The certificate is content-addressed and referenced by the `TierChange` (§4.4), so the basis for every promotion is itself in the Merkle history and re-checkable. The *contract* of equivalence is committed (§7 RD-2): the compiled output must lie in the **high-probability support of Tier-0's action distribution** under the `EquivalenceMetric`, validated by shadow execution — not an exact point match, since Tier-0 is itself a distribution.
+
+> **Why this defers Tier 2.** The `EquivalenceMetric` itself — *what distance, what
+> threshold, action vs. downstream outcome* — is **undefined** (§8a). For a Tier-1
+> exact-match memo this is moot: equivalence is trivial point identity on an observed
+> key, so the "certificate" degenerates to "this key was seen and replayed," which is
+> sound. But for a **Tier-2** artifact that generalizes a **stochastic** policy into
+> deterministic code, an `EquivalenceCertificate` built on an unstated metric
+> certifies nothing falsifiable — the equivalence rate it reports has no defined
+> meaning, and the "safe by construction" framing (§3.6) does not extend to it.
+> **Therefore a Tier-2 `EquivalenceCertificate` cannot be issued in v1, and Tier 2
+> cannot be promoted** (§2.2, §3.5). Defining and validating this metric is the first
+> blocking prerequisite for un-deferring Tier 2.
 
 ### 6.4 Audit trail in the Merkle history
 
@@ -519,12 +574,12 @@ A design review committed the following as **normative** design. They are writte
 
 1. **Tier-change authority scales with blast radius (LOCKED FORK, resolving former Open Q on authority).** Autonomy is granted in proportion to stakes:
    - **Tier-1 inline-cache fills are autonomous.** Filling a cache entry on miss is low-stakes (deopt-to-Tier-0 is always safe-by-construction, §3.6) and the Compiler/Sentinel MAY perform it without a consensus proposal — the JIT "just doing its job," exactly like a baseline JIT filling an inline cache.
-   - **Tier-2 deterministic-code synthesis REQUIRES a consensus proposal.** Promotion to a synthesized artifact is high-stakes (it *generalizes* rather than tabulates, §2.2) and MUST be routed as a typed `TierChange` proposal disposed by Genesis (`02`), per §5.4.
+   - **Tier-2 deterministic-code synthesis REQUIRES a consensus proposal — and is DEFERRED in v1.** Promotion to a synthesized artifact is high-stakes (it *generalizes* rather than tabulates, §2.2) and, *when Tier 2 ships*, MUST be routed as a typed `TierChange` proposal disposed by Genesis (`02`), per §5.4. In v1 no such promotion is offered: Tier 2 is deferred behind its blocking prerequisites (§3.5) until the equivalence metric exists and measured Tier-1 hit rates prove insufficient.
    - **Emergency safety demotions act autonomously, then are ratified.** A shadow-divergence or trap-storm demotion to Tier 0 executes **immediately** as a fail-safe and is ratified by a commit *after the fact* (see RD-7 for the contested-ratification semantics).
 
-2. **Equivalence means distributional containment, validated by shadow execution (resolving former Open Q on equivalence semantics).** A compiled policy is "equivalent" to Tier-0 iff its output lies in the **high-probability support of Tier-0's action distribution**, measured by an `EquivalenceMetric` (a semantic / embedding distance under a threshold), and confirmed empirically by **shadow execution** (§6.2). This is explicitly **not** exact-match: Tier-0 is itself a stochastic policy, so the equivalence target is a *distribution*, not a point. (The *precise* metric/threshold for a stochastic policy vs. deterministic code remains a research question — §8a.)
+2. **Equivalence means distributional containment, validated by shadow execution (resolving former Open Q on equivalence semantics).** A compiled policy is "equivalent" to Tier-0 iff its output lies in the **high-probability support of Tier-0's action distribution**, measured by an `EquivalenceMetric` (a semantic / embedding distance under a threshold), and confirmed empirically by **shadow execution** (§6.2). This is explicitly **not** exact-match: Tier-0 is itself a stochastic policy, so the equivalence target is a *distribution*, not a point. (The *precise* metric/threshold for a stochastic policy vs. deterministic code remains a research question — §8a.) **Consequence for shipping:** because that metric is the load-bearing trust boundary for *generalizing* code and it does not yet exist, the equivalence *contract* is satisfiable today only for **Tier-1 exact-match memoization** (where containment degenerates to observed-key identity). For **Tier 2** the contract has no operative metric, so Tier 2 is **deferred** (§2.2, §3.5); defining and validating this metric is its first blocking prerequisite.
 
-3. **"Enough observation" is decided by a sequential test, not a fixed window (resolving former Open Q on observation sufficiency).** Promotion readiness is gated by a **SPRT-style sequential test** over the OOD-boundary fit and outcome consistency, promoting when the test crosses a confidence bound — rather than a hand-set window size. The test's thresholds are **Sentinel-learned and bounded** in v1; they are deliberately **not** PID-coupled in v1 (the controller's cost pressure still modulates *whether* to compile per §5.2, but does not tune the statistical bound itself). (A principled stopping rule / sample-complexity bound is still open — §8b.)
+3. **"Enough observation" is decided by a sequential test, not a fixed window (resolving former Open Q on observation sufficiency).** Promotion readiness is gated by a **SPRT-style sequential test** over the OOD-boundary fit and outcome consistency, promoting when the test crosses a confidence bound — rather than a hand-set window size. The test's thresholds are **Sentinel-learned and bounded** in v1; they are deliberately **not** steering-loop-coupled in v1 (the controller's cost pressure still modulates *whether* to compile per §5.2, but does not tune the statistical bound itself). (A principled stopping rule / sample-complexity bound is still open — §8b.)
 
 4. **A site that never converges is capped and pinned to Tier 0 (resolving former Open Q on never-stabilizing agents).** When the same sequential test (RD-3) **fails** to converge at a site, the system **CAPS compile attempts per site with exponential backoff**, marks the site **"stay Tier 0,"** and **periodically re-evaluates** it (so a site that later stabilizes is not pinned forever). This bounds the cost of repeatedly attempting and aborting compilation on genuinely megamorphic sites. (Distinguishing "will never stabilize" from "has not stabilized yet" remains hard inference — §8c.)
 
@@ -544,7 +599,7 @@ A design review committed the following as **normative** design. They are writte
 
 The committed decisions above close the engineering questions. What remains is genuinely open *research*:
 
-- **(a) The precise `EquivalenceMetric` for a stochastic policy vs. deterministic code.** RD-2 fixes the *contract* (distributional containment, shadow-validated), but *what threshold, what distance, and whether to compare exact action vs. downstream outcome* is unresolved and a research question.
+- **(a) The precise `EquivalenceMetric` for a stochastic policy vs. deterministic code — the blocking prerequisite for Tier 2.** RD-2 fixes the *contract* (distributional containment, shadow-validated), but *what threshold, what distance, and whether to compare exact action vs. downstream outcome* is unresolved. This is not merely an open research question; it is the **first of two blocking prerequisites for un-deferring Tier 2** (§2.2, §3.5): until this metric is defined and validated, a Tier-2 `EquivalenceCertificate` certifies nothing falsifiable and the guard-soundness / "safe by construction" claims (§6.1, §6.3) cannot be made for generalized code. The **second** prerequisite is empirical — measured Tier-1 hit rates must prove insufficient to justify Tier 2's marginal risk (§3.5).
 - **(b) A principled stopping rule / sample-complexity bound for "enough observation."** RD-3 fixes the *mechanism* (a bounded sequential test), but a PAC-style sample-complexity bound on the OOD boundary — a principled rather than empirically-tuned stopping rule — remains research.
 - **(c) Distinguishing "will never stabilize" from "has not stabilized yet."** RD-4 fixes the *policy* (cap, back off, pin to Tier 0, re-evaluate), but deciding *which* sites are inherently megamorphic vs. merely not-yet-converged is itself hard inference and a research question.
 
@@ -556,7 +611,7 @@ The committed decisions above close the engineering questions. What remains is g
 |---|---|
 | **`00-overview.md`** | Canonical anchor. Reuses `Tier`, `AgentHarness`, `Hash`, `Commit`, `AgentId`, `ErrorVector`, the Compiler/Sentinel roles, and Principles 2 & 7 verbatim. This spec is the elaboration of the JIT commitment in §1 and Principle 7. |
 | **`04-runtime-and-harness.md`** | Direct substrate. `JitExecutor` wraps `AgentHarness::run` (Tier 0) and is transparent at the `TaskSpec → HarnessResult` boundary. `TaskSpec`, `Context`, `HarnessResult`, `CapabilitySet` are defined there. Tier-2 artifacts execute within the harness sandbox. |
-| **`03-control-loop.md`** | The economic engine. The PID `cost` dimension drives compilation pressure (§5.2); realized `cost_saved` feeds back into the cost estimate. The agent-JIT is the execution plane's **primary actuator for the cost dimension**. |
+| **`03-control-loop.md`** | The economic engine. The steering-loop `cost` dimension drives compilation pressure (§5.2); realized `cost_saved` feeds back into the cost estimate. The agent-JIT is the execution plane's **primary actuator for the cost dimension**. |
 | **`01-state-model.md`** | Tier is configuration-layer state. Every `TierChange` is a `TypedDiff` committed to the Merkle DAG; compiled-policy artifacts and equivalence certificates are content-addressed nodes. The audit trail (§6.4) lives here. |
 | **`02-consensus.md`** | Promotions are routed as typed `Proposal`s and disposed by Genesis consensus (propose ≠ dispose preserved inside the JIT, §5.4). |
 | **`07-observability.md`** | Supplies all profiling, trap/deopt telemetry, drift signals, and shadow/canary comparisons the Compiler and Sentinel consume. `DeoptEvent`, `ObservationRecord`, `ShadowReport`, `TierHealth` are emitted here. |

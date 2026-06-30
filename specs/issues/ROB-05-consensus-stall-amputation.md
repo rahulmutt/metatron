@@ -3,7 +3,7 @@ id: ROB-05
 title: Consensus stall amputates the external-action plane in minutes
 severity: high
 category: robustness
-status: open
+status: resolved
 affected_specs: [08-trust-and-security.md, 09-mcp-auth-proxy.md]
 review_verdict: CONFIRMED
 ---
@@ -39,3 +39,20 @@ agent off mid-window. Define the grace bound and the diagnostic-tool carve-out.
 - [ ] A bounded staleness grace window is specified, with its security trade-off stated.
 - [ ] Recovery/diagnostic tooling has a defined path during a stall.
 - [ ] Related: ROB-04 (the stall that triggers this is often a council deadlock).
+
+## Resolution
+
+Validate SVIDs against the last-known-good head with a bounded staleness grace window,
+and distinguish "head is stale" from "agent is revoked" so that only an explicit recorded
+revocation cuts an agent off mid-window. Define the grace bound, its security trade-off,
+and a diagnostic-tool carve-out during a stall.
+
+Rationale: fail-closed is correct for revocation but currently also fires on staleness,
+so a transient quorum stall expires every minutes-lived credential and amputates all
+external action — including the very tools an operator needs to diagnose and recover. A
+bounded grace window decouples a governance liveness failure from total loss of external
+capability without weakening genuine revocation.
+
+Coverage: satisfies all three checks — SVID validation separates stale-head from revoked,
+a bounded grace window is specified with its security trade-off, and recovery/diagnostic
+tooling has a defined path during a stall.

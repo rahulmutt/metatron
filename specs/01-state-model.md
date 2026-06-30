@@ -16,9 +16,9 @@ The State plane is Metatron's **system of record**. It answers exactly four ques
 3. **Can I trust that answer?** — every byte is content-addressed and every accepted update is signed by a Genesis quorum, so integrity and provenance are checkable offline.
 4. **What was the history of one thing?** — the evolution of a single agent, sub-goal, artifact, or task, extracted without replaying everything else.
 
-It owns the canonical **System State**, which per the anchor (§4) is a **layered world-model** with two layers — **configuration** (the agent org-chart) and **progress** (progress toward the user's goal) — versioned **together in one Merkle history**. It owns the representation of a **state update** as a **typed, schema-validated diff** (`TypedDiff`). It owns the **storage substrate**: a content-addressed Merkle DAG with BLAKE3 addresses, optimized for this workload rather than implemented as a naive blockchain.
+It owns the canonical **System State**, which per the anchor (§4) is a **layered world-model** with two layers — **configuration** (the agent org-chart) and **progress** (progress toward the user's goal) — versioned **together in one Merkle history**. It owns the representation of a **state update** as a **typed, schema-validated diff** (`TypedDiff`). It owns the **storage substrate**: a content-addressed, hash-linked log with BLAKE3 addresses, realized by an **off-the-shelf content-addressed store** (git or a hash-chained append-only table) rather than a bespoke engine or a naive blockchain (§5.10).
 
-The State plane is deliberately **passive and mechanical**. It does *not* decide what is true — that is Governance's job (`02`). It does *not* measure error — that is the PID controller's job (`03`). It does *not* run agents — that is Execution's job (`04`). It stores, addresses, validates the *shape* of, signs-check, serializes, and serves. The discipline that keeps Metatron auditable is precisely that this plane has no opinions: it records what consensus decided, exactly, forever.
+The State plane is deliberately **passive and mechanical**. It does *not* decide what is true — that is Governance's job (`02`). It does *not* measure error — that is the steering loop's job (`03`). It does *not* run agents — that is Execution's job (`04`). It stores, addresses, validates the *shape* of, signs-check, serializes, and serves. The discipline that keeps Metatron auditable is precisely that this plane has no opinions: it records what consensus decided, exactly, forever.
 
 This is design principle #6 from the anchor — *Record everything immutably* — made concrete.
 
@@ -70,6 +70,20 @@ Its nodes:
 - **`WiringEdge`** — a directed relationship between agents: supervision, delegation, review, mailbox routing. The org-chart is a graph, not a tree, so wiring is first-class edges rather than a parent pointer.
 - **`KernelSet`** — the privileged Guardian/Genesis membership. Mutations here are **constitutional amendments** (anchor §6) and the diff is flagged so `02` applies the ¾ threshold instead of ⅔. The State plane records the flag; it does not enforce the threshold.
 
+#### `AgentNode` — the one deliberately shared aggregate
+
+Metatron's model is otherwise **plane-sliced**: each plane owns its own state, and "clean slices" is the default. `AgentNode` is the **single intentional exception** — one aggregate, deliberately co-owned, that every plane needs to touch. We make this explicit rather than letting the slice framing imply the planes hold fully disjoint state: they do not, *here, by design*. The State plane owns the **container** (its content-addressing, history, and recorded lifecycle); the other planes own **fields within it**, grouped by owning plane:
+
+| Owning plane | Fields of `AgentNode` (see §3.2 for the struct) | Why it lives here |
+|---|---|---|
+| **State (01, this plane)** | `id`, `status` (recorded lifecycle), structural placement in the org-chart | State owns the node itself: it is content-addressed, versioned, and replayable like any other node. |
+| **Governance (02 / kernel)** | `role`, `class`, and whether the agent is in `KernelSet` | Authority to author/vote derives from role and kernel membership; a Guardian/Genesis change is constitutional. |
+| **Execution (04 / 05)** | `harness` (`HarnessBinding` + `CapabilitySet`, `04`), `tier` (`05`) | How and where the agent actually runs; reconciled by the execution backend. |
+| **Interaction (06)** | `assigned` (refs to sub-goals) | The bridge to the user-goal decomposition authored through the mailbox. |
+| **Observability (07)** | `reputation_ref` (owned by `08`, referenced advisorily), history taps | `07` reads the agent's commit history and the advisory reputation pointer; never canonical. |
+
+This is a common and sound pattern — **one aggregate with per-concern sections** — and stating it openly avoids the false impression that the planes are fully disjoint. The fields still have single owners (the table above); only the *container* is shared.
+
 #### Progress layer — progress toward the goal
 
 This layer records *what has been accomplished*, independent of *who is doing it*.
@@ -114,6 +128,8 @@ The chain of `parent` pointers is the **history**. Because every field is hashed
 
 **The head is serialized.** Per the anchor glossary: *"Head — the single current commit; consensus serializes the head, so forks are transient."* There is exactly one current head at any logical instant. Competing proposals may transiently form **sibling candidate commits** that share a `parent`, but the consensus vote selects at most one to become the new head; the losers are discarded (§4.6). Therefore Metatron's history is a **chain of accepted commits** embedded in a DAG of content-addressed *nodes* (world-model subtrees are a DAG; the *commit* spine is linear). There are **no permanent forks to reconcile** — this is the property that lets the State plane be a simple append-and-advance store rather than a CRDT/fork-merge engine.
 
+> **Write-path tiering.** The single, serialized, audited head is the **system of record** and earns its keep — there is exactly one ordered log. But not every advance pays for full council consensus. **Routine, reversible advances** — worker spawns, progress-layer status churn — land via **cheap optimistic concurrency on the head** (the per-node preconditions of §4.3) under **single-Guardian authority + post-hoc audit**, bypassing a full vote. **Full council consensus is reserved for high-blast-radius / irreversible / constitutional changes.** The State plane is the mechanism (one serialized head, optimistic CAS); the *gating* of which tier a diff takes is owned by **`02`** (consensus) and **`00`** (the blast-radius tiering), not re-specified here.
+
 > **Terminology.** "Merkle DAG" (anchor §1, §7) refers to the **content-addressed node graph** — world-model layers, nodes, and artifacts form a DAG with heavy structural sharing. The **commit history** is a linear chain within that graph. Both statements are true simultaneously: nodes form a DAG; accepted commits form a chain.
 
 ### 2.4 Content addressing & structural sharing
@@ -132,7 +148,7 @@ Every node — `Commit`, `WorldModel`, `AgentNode`, `TaskNode`, `ArtifactRef`, a
 - **Causality, not chronology, is what we must preserve.** What history must encode is *"this state was built on that state"* — a happened-before relation — not *"this happened at 14:03:07.221 UTC"*. The `parent` pointer already encodes causality for the commit spine; `LogicalTime` makes it a totalizable scalar.
 - **Determinism of replay.** Replaying the DAG (§3.4) must yield a single canonical order regardless of when or where replay happens. A logical clock derived from the structure does that; wall-clocks do not.
 
-So Metatron uses a **logical clock** as canonical and treats wall-clock as advisory metadata only. The minimal model (§4.7): a **Lamport-style counter** monotonic along the commit chain — `head.timestamp = parent.timestamp + 1` — giving every accepted commit a unique, gap-free, totally-ordered logical index. Because the head is serialized (§2.3), there is a single writer of the next index, so the simple scalar counter is **canonical and sufficient** for the *spine*; the per-author vector clock is dropped, and a Hybrid Logical Clock is carried for **display-only** human timelines (§4.7, §5.8). Wall-clock is retained as an **advisory** `wall_hint` inside the `decision` record (for human-facing displays and `07`), explicitly **not** load-bearing for ordering or verification.
+So Metatron uses a **logical clock** as canonical and treats wall-clock as advisory metadata only. The minimal model (§4.7) is exactly **one monotonic counter plus one human-readable hint**: a **Lamport-style counter** monotonic along the commit chain — `head.timestamp = parent.timestamp + 1` — giving every accepted commit a unique, gap-free, totally-ordered logical index. Because the head is serialized (§2.3), there is a single writer of the next index, so the simple scalar counter is **canonical and sufficient** for the *spine*; the per-author vector clock **and** the once-proposed separate Hybrid Logical Clock are both **dropped** as surplus machinery (§4.7, §5.8). Wall-clock survives only as the single **advisory** `wall_hint` inside the `decision` record (for human-facing displays and `07`), explicitly **not** load-bearing for ordering or verification.
 
 ### 2.6 Verifiability & replayability
 
@@ -296,6 +312,8 @@ Because `apply` is deterministic and content addresses are collision-resistant, 
 
 ### 3.5 Snapshotting, compaction, and pruning
 
+> **Deferred (§5.10).** The mechanisms in this section — snapshots, compaction, pruning — are **dropped/deferred for v0.1**: they are satellites of the bespoke store, replaced by the chosen off-the-shelf store's own retention/reclamation. The section is retained for design context, not as committed v0.1 scope.
+
 A naive blockchain keeps every transaction forever. Metatron does not have to, because verification can be re-anchored to a **signed snapshot**.
 
 - **Snapshot.** A `SnapshotCommit` is a special commit whose `state_root` is a *fully materialized* `WorldModel` (all reachable nodes present, no reliance on ancestor-only nodes) and which is signed by a Genesis quorum *attesting that replay from the previous snapshot reproduces this state_root*. A snapshot is a new trust anchor: readers may verify from the latest snapshot forward instead of from genesis.
@@ -408,6 +426,8 @@ If a precondition fails at apply-time, the diff is **rejected as stale** (a `Dif
 
 ### 4.4 Merkle collections
 
+> **Deferred (§5.10).** This bespoke collection engine — and the unresolved "HAMT or MST" leaf choice below — is **dropped**: keyed lookup, per-path history, and structural sharing come from the off-the-shelf content-addressed store. The `MerkleMap`/`MerkleSet` types below are read as the *logical* keyed-collection abstraction the store realizes, not a structure Metatron hand-builds.
+
 ```rust
 /// Content-addressed, hash-keyed map with O(log n) path-copying update.
 /// Realized as a HAMT or Merkle Search Tree. Two maps are equal iff their
@@ -482,21 +502,20 @@ Crucially, the fork is **never written to the head** and is **never reconciled**
 
 ```rust
 /// Canonical ordering for the commit spine. NOT wall-clock (§2.5).
+/// Exactly one monotonic counter + one human-readable hint (§5.8, OE-04).
 struct LogicalTime {
     index: u64,        // Lamport counter; head.index = parent.index + 1, gap-free
     // The per-author VersionVector (`vclock`) is DROPPED (§5.8): candidate
     // causality never needs more than "same parent ⇒ concurrent".
+    // A separate HybridLogicalClock is also DROPPED — see WallHint below.
 }
 
-/// Display-only, non-authoritative timeline ordering (§5.8). Never load-bearing
-/// for verification or the canonical spine order; like WallHint, for humans/07.
-struct DisplayClock { hlc: HybridLogicalClock }
-
-/// Advisory only — never load-bearing for ordering or verification (§2.5).
-struct WallHint { unix_millis: u64, source: AgentId }   // lives in the decision record (02)
+/// The single human-readable hint. Advisory only — never load-bearing for
+/// ordering or verification (§2.5). Lives in the decision record (02).
+struct WallHint { unix_millis: u64, source: AgentId }
 ```
 
-The `index` totally orders accepted commits (the spine is linear, so it is gap-free and unique), and because the head is serialized there is a single writer of the next index — the scalar suffices and the `vclock` is **dropped** (§5.8). For human-readable total-order timelines, a **Hybrid Logical Clock** is carried for **display only**, explicitly non-authoritative. Wall-clock likewise survives only as a non-canonical `WallHint` in the decision record for human display and `07` correlation.
+The `index` totally orders accepted commits (the spine is linear, so it is gap-free and unique), and because the head is serialized there is a single writer of the next index — the scalar suffices and the `vclock` is **dropped** (§5.8). For human-readable timelines the **`WallHint`** (advisory, non-canonical) in the decision record is the single human hint, used by `07` for display and correlation; no separate logical display clock is carried.
 
 ### 4.8 Read / query interface
 
@@ -571,7 +590,7 @@ The State plane treats signatures as **opaque blobs it stores and feeds to `08`'
 
 ## 5. Resolved decisions
 
-A design review closed the structural tensions previously parked here. Each item below is now **committed, normative design**. The body sections above remain authoritative; these decisions refine and bind them. They are stated as decided design, not as questions. Exactly one genuinely-open *tuning* parameter remains (§6).
+A design review closed the structural tensions previously parked here. Each item below is now **committed, normative design**. The body sections above remain authoritative; these decisions refine and bind them. They are stated as decided design, not as questions. **§5.10 (adopt an off-the-shelf content-addressed store) supersedes and marks deferred several earlier items here** — read §5.1, §5.2, §5.5, §5.7 as deferred under §5.10. No genuinely-open design parameter remains (§6).
 
 ### 5.1 Pruning is governed, with differential retention
 
@@ -627,25 +646,45 @@ Stated explicitly: **verifiable-by-address ≠ retrievable.** The hash proves id
 
 `verify_integrity`/`verify_replay` (§4.8) run **incrementally/streaming from the latest snapshot forward**, not from genesis. Snapshots are the verification anchor, so steady-state cost is bounded by inter-snapshot history rather than total history. A **periodic full re-verification from genesis runs as a background audit** (defense-in-depth), decoupled from the hot path. (Refines §2.6, §3.5, §4.8.)
 
-### 5.8 Logical clock: keep the scalar Lamport `index`, drop `vclock`, add a display-only HLC
+### 5.8 Logical clock: one monotonic counter + one human hint (drop `vclock` and the HLC)
+
+The three-clock apparatus is reduced to exactly **one monotonic counter plus one human-readable hint** (OE-04):
 
 - The scalar **Lamport `index` remains canonical** (§4.7): the serialized head gives a single writer, so a gap-free scalar totally orders the spine — sufficient.
 - The **`vclock` / `VersionVector` is dropped.** Candidate causality never needs more than "same parent ⇒ concurrent," so the per-author vector is unused weight.
-- For human-readable **total-order timelines**, a **Hybrid Logical Clock (HLC)** is added, used for **display only** and explicitly **non-authoritative** (like `WallHint`). It orders events legibly for humans without ever being load-bearing for verification or the canonical spine order.
+- The once-proposed **separate Hybrid Logical Clock is also dropped.** Human-readable timelines are served by the advisory **`WallHint`** already carried in the decision record (§4.7) — explicitly non-authoritative — so a second display clock is surplus machinery, not a concrete need.
 
-This also settles `07`'s clock question. (Refines §2.5, §4.7.)
+This also settles `07`'s clock question: `07` orders displays by `WallHint`, never by a load-bearing clock. (Refines §2.5, §4.7.)
 
 ### 5.9 Storage: one content-addressed store, separate retention namespaces (`07` cross-ref)
 
 The immutable **event log** and the **Merkle DAG share one content-addressed store** — a single immutable truth, joined by the commit's content address (`CommitHash`) — with **separate retention namespaces**, so configuration-vs-progress retention (§5.1) and log-vs-DAG compaction are governed independently over the same underlying blobs. This answers the `07` storage cross-reference. (Refines §3.1, §4.5; cross-refs `07`.)
 
+### 5.10 Storage engine: adopt an off-the-shelf content-addressed store (OE-04)
+
+The State plane is the system of record for an artifact this very spec proves is a **signed, single-writer, linear chain** of commits (§2.3, §3.1). Building a bespoke content-addressed database under a linear log is over-built for v0.1, so the storage substrate is realized by an **off-the-shelf content-addressed store — git, or a hash-chained append-only table** — not a hand-rolled engine. Off the shelf we get exactly the load-bearing properties: **content-addressing, tamper-evidence (hash-linking), structural sharing, and per-path history.**
+
+**Kept — these earn their keep and remain fully normative:**
+
+- The **typed-diff algebra** (§4.2): the closed, schema-validated operation set is what makes updates machine-checkable and is independent of how bytes are stored.
+- The **invariant checks** I1–I7 (§4.2) and the deterministic `apply` (§3.4): verification and replay of the *logical* state are properties of the diff algebra, not of the store.
+- The content-addressed signed-log model itself (§2.3, §2.6), `LogicalTime` reduced to one counter + one hint (§5.8), and the optimistic-concurrency preconditions (§4.3) the store backs with a compare-and-swap on its head ref.
+
+**Dropped / deferred — not load-bearing for a v0.1 signed linear log; off-the-shelf or later concerns:**
+
+- The **bespoke HAMT / Merkle-Search-Tree collection engine** (§3.2, §4.4). This also **resolves the unresolved "HAMT or MST" non-decision by removing it** — the off-the-shelf store provides keyed lookup and per-path history directly; Metatron picks no bespoke leaf structure.
+- **Path-copying as a hand-implemented mechanism** (§2.4): structural sharing comes from the store, not from code Metatron maintains.
+- **Epoch GC** (§5.2), **snapshots / compaction** (§3.5), **differential per-layer retention** (§5.1), and **versioned-codec replay** (§5.5). These are deferred; where retention or reclamation is needed it is an operational concern of the chosen store (e.g. `git gc`, table partition retention), governed but not bespoke-built. **Snapshot-anchored incremental verification (§5.7)** likewise becomes an optimization deferred behind the store's own capabilities — full integrity/replay over a v0.1 linear log is cheap.
+
+The decision is to adopt the off-the-shelf store; no concrete v0.1 requirement was found that git or a hash-chained table cannot meet. This decision **supersedes and marks deferred** §5.1, §5.2, §5.5, §5.7 and the bespoke machinery they refine; the §5.9 "one content-addressed store" intent is satisfied directly by the chosen substrate. (Refines §1, §2.4, §3.1, §3.2, §3.5, §4.4, §4.5; supersedes §5.1, §5.2, §5.5, §5.7.)
+
 ---
 
 ## 6. Open questions & ambiguities
 
-The design review (§5) closed the structural questions. One genuinely-open item remains — and it is a **tuning parameter, not a design choice**:
+The design review (§5) closed the structural questions. The one previously-open tuning parameter has since been **deferred along with the machinery it parameterized**:
 
-1. **Snapshot cadence vs. verification-cost tuning (and exact retention horizons).** How often to cut a snapshot trades incremental verification/replay cost (§5.7) against snapshot-production overhead and prunable-history depth; and the exact **retention horizons** for the prunable progress layer (§5.1) — time? commit-count? per-class? — are likewise workload-dependent. These are **empirical parameters to be tuned against real workloads**, not resolved on paper. The mechanisms they parameterize (incremental verification, governed differential-retention pruning) are fixed by §5.
+1. **Snapshot cadence / retention horizons — deferred (§5.10).** This used to trade incremental verification/replay cost against snapshot-production overhead and prunable-history depth (snapshots §3.5, retention §5.1, incremental verification §5.7). With the adoption of an **off-the-shelf content-addressed store** (§5.10), snapshots, compaction, and differential retention are dropped/deferred for v0.1, so this is no longer a Metatron design parameter: any future retention/compaction tuning becomes an **operational setting of the chosen store** (e.g. `git gc` cadence, table partition retention), not a substrate to be designed on paper.
 
 ---
 
