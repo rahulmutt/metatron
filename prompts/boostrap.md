@@ -1,0 +1,11 @@
+I want to build a system called Metatron along the lines of Gas Town by Steve Yegge, Agent Hub by Andrej Karpathy, Symphony by OpenAI but far more principled and extensible like Kubernetes (abstract over agent execution and storage of system evolution). Also instead of one "Mayor" (hereforth we'll refer to it as Genesis) we have multiple Genesis agents each which come to consensus over the agent structure based on the problem at hand, and the multi-agent setup should be recorded via consensus. We basically treat multi-agent systems as probabilistically Byzantine-fault tolerant systems because by nature agents can act out of character and not follow protocol. Moreover we should apply the principles of PID from control theory to help the system reach the target state set by the external user of the system. The external user of the system sends instructions and the Genesis agents (or perhaps a separate set of Guardian agents) take input from the user, discuss the best way to approach it, and propose a state update of the system to the Genesis agents who debate over approaches and come to a consensus via votes. All state updates of the system should be stored as merkle trees similar to blockchains, but optimized for this use case. At any point the agents in between can have questions for the external user because of ambiguity and should surface them to the user and will not proceed until they receive answers. In between the genesis agents (or other agent class) are consulted for whether the existing inputs provided by the user already resolve the ambiguity and if not it is surfaced to the user (via a notification system / mailbox in the API).
+
+Also, in this system, any agent can be compiled down to a pure deterministic software system with traps to go back to the dynamic LLM-based agent (there can be another class of agents that monitors this) think of JIT compilation.
+
+This system should combine ideas from blockchain technology, JIT compilation, 
+
+Monitoring should be paramount - it should be easy to monitor everything that is going on.
+
+The system implementation itself can run on the Actor model in process in Rust, or can also be implemented in Kubernetes via CRDs and reuse its infrastructure - extension points should be there to support both execution styles.
+
+Core system should be implemented in Rust.
