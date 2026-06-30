@@ -152,7 +152,7 @@ y_latency(k) = clamp01( max( head_staleness, oldest_open_task_age, mailbox_wait 
                         / latency_ceiling )                            // all from 07 + 06
 ```
 
-**General estimator contract.** Every estimator implements `Estimator` (§4). Estimators that call judges declare a per-call **noise estimate** `sigma_d` used to set filter strength (§6.4). Estimators are sampled, side-effect-free reads; they never write state.
+**General estimator contract.** Every estimator implements `Estimator` (§4). Estimators that call judges declare a per-call **noise estimate** `sigma_d` used to set filter strength (§6.4). Per-judge **bias** is calibrated against ground truth and subtracted upstream of this contract (§7.5). Estimators are sampled, side-effect-free reads; they never write state.
 
 ### 3.3 Normalization
 
@@ -161,13 +161,20 @@ The dimensions are heterogeneous (a token count, a wall-clock duration, a unitle
 - **Ratio-to-ceiling** (`cost`, `latency`): divide by a user/Guardian-supplied ceiling, clamp to `[0,1]`. The setpoint is then simply the ceiling-fraction we tolerate (e.g. `r_cost = 0.8`: act once 80% of budget is consumed).
 - **Already-bounded** (`progress`, `divergence`): structural ratios and dispersion are natively `[0,1]`; judges emit `[0,1]` by contract.
 
-Normalization is a **modeling choice with consequences** (whether heterogeneous scales are truly comparable is parked in §7). The deliberate decision here is to **decouple** the dimensions (§3.6) so cross-scale comparability is *not required* for correctness — only per-dimension scale stability is.
+Normalization is a **modeling choice with consequences** (whether heterogeneous scales are truly comparable is settled in §7.4: per-dimension scales, with a common utility applied *only* at action selection). The deliberate decision here is to **decouple** the dimensions (§3.6) so cross-scale comparability is *not required* for correctness — only per-dimension scale stability is.
 
 ### 3.4 Discrete-time formulation
 
 The controller is **sampled**, not continuous. It runs once per **control period** `T_s` (the *sampling period*). Default `T_s = 30 s`, lower-bounded by estimator cost (judges are not free) and upper-bounded by responsiveness needs; it is itself adaptable (§6.6). Sample index `k`; wall-time `t = k · T_s`.
 
-For each dimension `d`, with error `e_d(k) = r_d(k) − y_d(k)`:
+**Multi-rate structure (§7.6).** Not every sensor produces independent information at `T_s`, and high-quality judges are too expensive to run that often. The loop is therefore **multi-rate**:
+
+- **Fast loop** — hard-metric dimensions (`cost`, `latency`, structural `progress`, and `dispersion`-fed `divergence`) sample every `T_s = 30 s`.
+- **Slow loop** — LLM-judged quantities (the semantic component of `progress`, and any judge-backed dimension) sample every `T_slow = m · T_s` with `m ∈ [5, 10]`, and **hold last value** between judge samples: `y_d(k) = y_d(k_last)` until a fresh judge sample lands.
+
+A held measurement is **piecewise-constant** between judge samples, so during the hold its derivative contribution is zero (`ŷ_d(k) − ŷ_d(k−1) = 0` → no synthetic velocity), while its proportional and integral terms keep acting on the held error. The control law below runs every fast step `k`; slow-loop dimensions simply re-use their most recent measurement, which keeps judge cost tractable without destabilizing the fast dimensions.
+
+For each dimension `d`, with error `e_d(k) = r_d(k) − y_d(k)` (using the held `y_d` on the slow loop):
 
 **Proportional term**
 
@@ -201,7 +208,7 @@ The full **control vector** is `u(k) = [u_0(k), …, u_{D−1}(k)]`. Each `u_d �
 
 ### 3.5 Per-dimension gains (baseline)
 
-Gains encode each dimension's dynamics and the asymmetry of the cost of acting. These are **starting points** for the tuning procedure of §6.5, *not* claimed-optimal constants (the absence of a plant model is parked in §7).
+Gains encode each dimension's dynamics and the asymmetry of the cost of acting. These are **starting points** for the tuning procedure of §6.5, *not* claimed-optimal constants. The committed tuning policy is §7.2 (offline/shadow first, then conservative online gain-scheduling); whether that ultimately suffices for the nonstationary plant remains open (§8b).
 
 | `d` | Dim | `Kp` | `Ki` | `Kd` | Rationale |
 |-----|-----|------|------|------|-----------|
@@ -220,7 +227,7 @@ The baseline is **`D` independent SISO PID loops**, one per dimension — *not* 
 - It is **interpretable and auditable**: every control action traces to one dimension's error, which matters because actions become governance proposals that humans and the council review.
 - It is **robust to a missing/failed sensor**: one estimator going dark disables one loop, not the controller.
 
-The dimensions *are* coupled in reality (spawning workers to fix `progress` raises `cost` and may raise `divergence`; JIT-compiling to fix `latency` lowers `cost`). The decoupled design handles this **at the action layer, not the control law**: the action-selection stage (§3.7) is aware of cross-dimension side-effects and the council sees the *net* of all proposals in a cycle. A static **decoupling/interaction matrix** `Γ ∈ R^{D×D}` is reserved as an optional pre-compensation step (`u' = Γ · u`) for future MIMO work; at baseline `Γ = I`. Whether decoupled SISO is sufficient or a true MIMO controller is warranted is parked in §7.
+The dimensions *are* coupled in reality (spawning workers to fix `progress` raises `cost` and may raise `divergence`; JIT-compiling to fix `latency` lowers `cost`). The decoupled design handles this **at the action layer, not the control law**: the action-selection stage (§3.7) is aware of cross-dimension side-effects and the council sees the *net* of all proposals in a cycle. A static **decoupling/interaction matrix** `Γ ∈ R^{D×D}` is reserved as an optional pre-compensation step (`u' = Γ · u`) for future MIMO work; at baseline `Γ = I`. This is settled in §7.3: **decoupled SISO with identity `Γ` ships in v1**, and a non-trivial `Γ` is a documented **upgrade path**, adopted only if cross-coupling is shown to measurably mis-steer the loop.
 
 ### 3.7 Action selection: from control vector to `ControlAction`s
 
@@ -250,7 +257,7 @@ fires(d, k) = |u_d(k)| ≥ δ_off_d       (to keep acting; δ_off_d < δ_on_d)
 | latency | `−` (too slow) | council is the bottleneck | `NarrowCouncil` |
 | (any) | — | a Tier-2 path keeps trapping | `Deopt{agent}` (`05`) |
 
-**Conflict resolution.** When firing dimensions select antagonistic actions (e.g. `cost` says `RetireAgents`, `progress` says `SpawnAgents`), the selector emits **both** as advisory actions tagged with their driving error magnitudes and lets the **actuator path arbitrate**: Guardians may merge them into a single net proposal, and consensus weighs the trade-off. The controller does not pre-resolve value trade-offs that the council exists to make. (This is the practical payoff of routing actuation through governance.)
+**Conflict resolution.** When firing dimensions select antagonistic actions (e.g. `cost` says `RetireAgents`, `progress` says `SpawnAgents`), the selector emits **both** as advisory actions tagged with their driving error magnitudes and lets the **actuator path arbitrate**: Guardians may merge them into a single net proposal, and consensus weighs the trade-off. Where the trade-off is numerically comparable, antagonistic actions are scored on a common *expected goal-completion-per-cost* utility **at this layer only** (§7.4); genuinely incomparable, value-laden trade-offs are escalated to the council, not resolved by the controller. The controller does not pre-resolve value trade-offs that the council exists to make. (This is the practical payoff of routing actuation through governance.)
 
 The output is a `ControlBatch` (§4): the set of advisory actions for sample `k`, each carrying provenance.
 
@@ -342,6 +349,7 @@ struct DimensionSpec {
 }
 
 /// Where the per-dimension setpoint r_d comes from. Resolved against the user target state in 06.
+/// Resolution priority (§7.1): explicit user override (06) → guardrailed learned refinement → safe default.
 enum SetpointSource {
     Trajectory(/* target completion vs. logical time */),   // progress
     Ceiling(f32),                                            // cost/divergence/latency (normalized cap)
@@ -426,7 +434,7 @@ struct ControlBatch {
 
 The integral term accumulates error. If the actuator is saturated or the council keeps **rejecting** the controller's advice, error persists, `I_d` grows without bound, and when the situation finally clears the controller massively over-corrects (classic *integral windup*). Because Metatron's actuator is a *deliberative body that can refuse*, windup risk is **higher** here than in a normal control loop. Two combined defenses:
 
-- **Clamping:** hard-limit `I_d ∈ [i_min, i_max]` every step.
+- **Clamping:** hard-limit `I_d ∈ [i_min, i_max]` every step. This clamp does double duty: it also **bounds the standing error a biased judge would otherwise integrate** (§7.5).
 - **Conditional integration:** freeze integration (`I_d(k) = I_d(k−1)`) whenever the output is saturated *or* the previous batch's advice for this dimension was declined/rejected — i.e. stop accumulating error the controller is **not currently able to act on**.
 
 Rejected-advice-aware anti-windup is the Metatron-specific twist: the integrator must not punish the controller for the council's vetoes.
@@ -469,7 +477,7 @@ The design therefore **biases low**: conservative gains, heavy filtering on nois
 
 ### 5.6 Tuning approach (no plant model)
 
-There is no transfer function for "a council of LLM agents," so classic model-based tuning (pole placement, etc.) does not apply directly. The pragmatic approach:
+There is no transfer function for "a council of LLM agents," so classic model-based tuning (pole placement, etc.) does not apply directly. The committed policy (§7.2) is **offline/shadow tuning first, then conservative online gain-scheduling keyed to regime — no MRAC in v1**; the pragmatic procedure that implements it:
 
 1. **Dimensional bootstrap:** start from §3.5's conservative gains (deliberately low).
 2. **Per-loop relay/step experiments in simulation:** drive a simulated plant (recorded traces / a cheap surrogate) with step changes and a Ziegler–Nichols-style *relay* experiment to find each loop's ultimate gain `Ku` and period `Pu`, then back off well below the ZN recommendation (these loops want damping, not aggressiveness).
@@ -510,23 +518,41 @@ Illustrative, `T_s = 30 s`, baseline gains. Suppose at sample `k`:
 
 ---
 
-## 7. Open questions & ambiguities
+## 7. Resolved decisions
 
-> Parked per overview §9. Each is a genuine unresolved design question, not a TODO.
+> A design review settled the following prior open questions. Each is now **committed, normative design** — not a metaphor and not a TODO — and constrains the section it names. The few items that remain genuinely open are in §8.
 
-1. **Tuning without a plant model.** §5.6 is a *procedure*, not a guarantee. We have no validated transfer function for an LLM-agent ensemble, and the plant is non-stationary (§5.5.4). Open: is offline/shadow tuning sufficient, or do we need online adaptive control (gain-scheduling, MRAC), and if so how do we keep *adaptation itself* stable?
-2. **Decoupled SISO vs. true MIMO.** §3.6 chooses `D` independent loops with action-layer coupling and an identity `Γ`. The dimensions are genuinely coupled (spawn ↑progress but ↑cost,↑divergence). Open: when does decoupled control measurably mis-steer, and is a proper MIMO controller (or at least a non-trivial decoupling matrix `Γ`) worth its modeling cost and loss of interpretability?
-3. **Normalizing heterogeneous dimensions.** §3.3 normalizes each dimension to `[0,1]` independently and relies on per-dimension gains so cross-scale comparability is never *required*. But conflict arbitration (§3.7) and any future MIMO design *do* compare across dimensions. Open: is there a principled common scale (e.g. everything mapped to "expected impact on goal-completion-per-cost"), or is cross-dimension comparison inherently a value judgment that *should* stay with the council?
-4. **LLM-judge measurement noise & bias.** Filtering (§5.4) handles *variance*; it does not handle *bias* (a judge systematically optimistic about progress integrates into a persistent steady-state error via the I term). Open: how do we calibrate judges against ground truth (tie-in to reputation, `08`), detect judge drift, and bound integral error under biased sensing?
-5. **Setpoint specification burden.** Per-dimension setpoints (budget ceiling, latency cap, progress trajectory, divergence tolerance) must come from the user via `06`. Most users won't supply a divergence tolerance or a progress trajectory. Open: what are safe defaults, and can the controller *learn* setpoints from revealed preference without the user stating them?
-6. **Actuation through a refusing actuator.** Consensus can persistently reject the controller's advice. Anti-windup (§5.1) prevents windup, but a controller whose every action is vetoed is *effectively open-loop*. Open: how should the controller behave when systematically overruled — escalate the *disagreement between controller and council* to the user? Decay its own influence? This is a novel failure mode with no classical analogue.
-7. **Sampling period vs. judge cost.** `T_s = 30 s` assumes estimator reads (including judges) are cheap enough to run that often. High-quality judges are not. Open: per-dimension multi-rate sampling (fast for hard metrics, slow for judged dimensions) and its effect on the unified discrete-time law.
-8. **Stability proof.** We assert stability heuristically (conservative gains + filtering + deadband). Open: is there *any* tractable formal stability argument (e.g. passivity, small-gain with a bounded-delay actuator model, or a Lyapunov argument over a simplified surrogate plant), even for the decoupled single-loop case?
-9. **Interaction with reputation dynamics.** Reputation (`08`) re-weights votes, which changes `Decision.dispersion`, which is the `divergence` sensor — a slow inner loop nested inside the control loop. Open: can the reputation loop and the control loop resonate, and do they need to be designed with separated time-scales?
+1. **Setpoints — safe defaults + override + learn** *(was Open Q5; locked).* The controller **ships conservative default setpoints** per dimension (a default budget ceiling, latency cap, divergence tolerance, and progress trajectory) so the system is usable when the user supplies nothing. The user **may override any setpoint explicitly** via the Interaction plane (`06`). Beyond that, the controller **refines setpoints from revealed preference** over time — observed accept / reject / escalation behavior — with **guardrails that bound how far a learned setpoint may move from its safe default**. `SetpointSource` (§4) resolves in strict priority order: **explicit user override → guardrailed learned refinement → safe default**. (The guardrail specification itself remains open: §8c.)
+
+2. **Tuning — offline/shadow first, then conservative online gain-scheduling** *(was Open Q1).* Gains are tuned **offline / in shadow mode on recorded traces** (§5.6) before any online use. In production the controller uses **gain-scheduling keyed to regime** — *exploration* vs. *convergence* — with **slow, bounded adaptation** only. **No MRAC in v1.** Whether offline + gain-scheduling is ultimately sufficient, or genuine adaptive control is eventually required, remains a research question (§8b).
+
+3. **SISO + action-layer coupling for v1; `Γ` is an upgrade path** *(was Open Q2).* v1 ships **`D` decoupled SISO loops with identity decoupling matrix `Γ = I`** and handles cross-coupling at the action layer (§3.6) — chosen for interpretability and auditability. A **non-trivial decoupling matrix `Γ`** is a **documented upgrade path**, adopted only if cross-coupling is *measured* to mis-steer the loop.
+
+4. **Normalization — per-dimension `[0,1]` + per-dimension gains; common utility only at action selection** *(was Open Q3).* Each dimension stays on its own `[0,1]` scale with its own gains (§3.3); dimensions are never made mutually comparable in the control law. They are mapped onto a common **"expected impact on goal-completion-per-cost"** utility **only at the action-selection layer** (§3.7), where antagonistic actions must be weighed. Genuinely **incomparable trade-offs remain a council value judgment** and are **escalated**, not resolved numerically.
+
+5. **Judge bias — calibrate, subtract, clamp** *(was Open Q4).* LLM judges are **calibrated against ground truth** using the shared reputation machinery (`08`). Each judge's **bias is estimated from its ground-truth residuals and subtracted** from its raw output (§3.2). The **integral term is clamped** (§5.1) to **bound the biased-sensing drift** that would otherwise integrate into a persistent steady-state error. **Sentinels (`07`)** watch for judge drift. (Filtering, §5.4, handles *variance*; this decision handles *bias*.)
+
+6. **Multi-rate sampling** *(was Open Q7).* The loop is **multi-rate** (§3.4): a **fast loop** samples hard metrics at `T_s = 30 s`; a **slow loop** samples LLM-judged dimensions at **5–10× `T_s`**, with **hold-last-value** between judge samples. The discrete-time control law is updated to reflect this structure (held measurements contribute zero derivative between judge samples while P and I keep acting on the held error).
+
+7. **Reputation / control time-scale separation** *(was Open Q9).* The reputation loop (`08`) **adapts slowly** — low learning rate — relative to control `T_s`, and is treated as **quasi-static within a control horizon**. This enforced **time-scale separation** is what keeps the nested reputation → `Decision.dispersion` → `divergence` loop from resonating with the control loop.
+
+8. **Refusing actuator — decay influence + distinct disagreement notification** *(was Open Q6).* When the controller is **systematically overruled** by consensus, it (a) **decays its own influence** and (b) raises a **distinct "controller-vs-council disagreement" notification** to the user via `06` (separate from ordinary escalations). This is part of the **tiered-liveness response** to a refusing actuator, and complements the rejected-advice-aware anti-windup of §5.1.
 
 ---
 
-## 8. Relationships to other specs
+## 8. Open questions & ambiguities
+
+> Parked per overview §9. The design review (§7) closed most prior items; these three are genuinely unresolved.
+
+a. **Formal stability proof for the real plant** *(research).* We assert stability heuristically (conservative gains + filtering + deadband + time-scale separation), and the strongest argument we can currently make is a **heuristic small-gain / passivity argument over a *simplified surrogate* plant**. Open: a **tractable formal stability proof for the real, nonstationary plant** — an LLM-agent ensemble whose gain shifts as agents are added, JIT-compiled, and re-weighted (§5.5.4) — rather than for the surrogate.
+
+b. **Is offline + gain-scheduling tuning sufficient?** *(research).* §7.2 commits to offline/shadow tuning plus conservative online gain-scheduling and rules out MRAC for v1. Open: whether that is **ultimately sufficient**, or whether **genuine adaptive control** is eventually required for the nonstationary plant — and, if so, how to keep *adaptation itself* stable.
+
+c. **Guardrails on learned setpoints** *(design).* §7.1 commits to refining setpoints from revealed preference within bounds. Open: the concrete **guardrails** that keep revealed-preference learning from **drifting setpoints into unsafe targets** — e.g. a learned budget ceiling creeping unboundedly upward, or a divergence tolerance learned so high the council's disagreement stops registering at all.
+
+---
+
+## 9. Relationships to other specs
 
 | Spec | Relationship |
 |------|-------------|
@@ -537,5 +563,5 @@ Illustrative, `T_s = 30 s`, baseline gains. Suppose at sample `k`:
 | `05-agent-jit.md` | `TriggerJit` and `Deopt` are control actions (cost/latency relief; trap-rate response). Sentinel-measured trap rates can feed the `divergence`/cost estimators. |
 | `06-interaction-and-mailbox.md` | **Source of the setpoint.** The user's target state defines `r_d` per dimension via `SetpointSource`. Guardians are the actuator: they receive the `ControlBatch` and author proposals. `EscalateToUser` actions surface through the mailbox and may *block* affected work (overview §5). |
 | `07-observability.md` | **The sensor substrate.** Hard metrics for every estimator (spend, wall-clock, task-node closure, trap/retry rates, staleness). The controller logs its `ErrorVector` and `ControlBatch` back to `07` for auditability. |
-| `08-trust-and-security.md` | Reputation calibrates the LLM judges and the council whose dispersion feeds `divergence`; Sentinel off-protocol rates optionally feed the `divergence` estimator (§3.2). Judge-bias calibration (open question 4) ties in here. |
+| `08-trust-and-security.md` | Reputation calibrates the LLM judges and the council whose dispersion feeds `divergence`; Sentinel off-protocol rates optionally feed the `divergence` estimator (§3.2). Judge-bias calibration — **calibrate, subtract, clamp** (§7.5) — ties in here, as does reputation/control time-scale separation (§7.7). |
 ```

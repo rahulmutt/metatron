@@ -3,7 +3,7 @@
 > **Status:** Research architecture specification (v0.1)
 > **Plane:** Interaction (top of the stack in `00-overview.md` §2).
 > **Owning role:** **Guardian** agents (the user's advocate; *propose* power, never *vote*).
-> **Depends on:** `00-overview.md` (canonical vocabulary & types — when this spec disagrees with it, the overview wins). References `01-state-model.md` (progress layer, open questions), `02-consensus.md` (typed `Proposal`, consensus escalation), `03-control-loop.md` (`ErrorVector`, setpoint, control-loop escalation), `08-trust-and-security.md` (external identity vs `AgentId`).
+> **Depends on:** `00-overview.md` (canonical vocabulary & types — when this spec disagrees with it, the overview wins). References `01-state-model.md` (progress layer, open questions), `02-consensus.md` (typed `Proposal`, consensus escalation), `03-control-loop.md` (`ErrorVector`, setpoint, control-loop escalation), `08-trust-and-security.md` (external identity, authentication, and per-user authorization scopes — `ExternalUserId` is a separate principal type, **not** an `AgentId`).
 
 ---
 
@@ -19,7 +19,9 @@ Concretely, the Interaction plane is responsible for five things, all owned by *
 4. **Detect AMBIGUITY** in an instruction or in any downstream work derived from it, and resolve it under a strict two-step gate (auto-resolve from existing context, else escalate to the user).
 5. **Author typed PROPOSALS** (`Proposal`, defined in `00` §7, elaborated in `02`). Guardians are the *only* role with propose power; every user-originated change to the world-model enters governance as a Guardian-authored proposal.
 
-The plane also owns **the Mailbox**: the single bidirectional channel between the system and the user. Outbound it carries **questions** and **notifications**; inbound it carries **answers** and **new instructions**. The Mailbox is also the boundary at which *internal escalations surface to the human*: consensus escalations from `02` and control-loop escalations from `03` both reach the user as mailbox items.
+The plane also owns **the Mailbox**: the bidirectional channel between the system and its users. Outbound it carries **questions** and **notifications**; inbound it carries **answers** and **new instructions**. The Mailbox is also the boundary at which *internal escalations surface to the human*: consensus escalations from `02` and control-loop escalations from `03` both reach the user as mailbox items.
+
+**Multi-user from the start.** Metatron is **multi-tenant**: several authenticated external users interact with the same system concurrently, each with their own intent thread, their own **per-user mailbox**, and their own **authorization scopes** over which goals and budgets they may set or answer for. Every artifact in this plane carries a **principal** dimension. The external principal is a *separate principal type* — an authenticated **`ExternalUserId`**, distinct from the internal public-key-derived **`AgentId`** (`00` §7). This spec **assumes** an authenticated `ExternalUserId` and a resolved set of per-user scopes; *how* a user authenticates and how those scopes are issued/checked is owned by `08-trust-and-security.md` and referenced, not redefined, here.
 
 **Design tenet (from `00` §6).** The user is an external, unreliable, high-latency oracle. We treat their attention as the scarcest resource in the system. The plane is engineered to *minimize* the number of questions that reach them — first by normalizing aggressively, then by resolving ambiguity from existing context before ever interrupting them — and to make every question that does reach them load-bearing: some specific unit of work is *blocked* on it.
 
@@ -58,13 +60,16 @@ Instruction ──normalize──▶ Goal ──derive──▶ Setpoint ──�
 | **Ambiguity** | A point in an instruction, goal, or derived unit of work where more than one materially-different interpretation is admissible, *and* the choice affects the outcome. Detected by any agent; adjudicated by Guardians. |
 | **Question** | A typed request for user input that has survived the two-step resolution gate. Surfaced via the Mailbox. Linked to the progress-layer node it gates. |
 | **Answer** | The user's typed response to a Question. Unblocks the gated work and is recorded as a new user input. |
-| **Notification** | An outbound, *non-blocking* message from the system to the user (status, escalation summary, completion). The user is not required to respond. |
-| **Mailbox** | The bidirectional channel carrying Questions/Notifications out and Answers/Instructions in. The external API surface (§4). |
+| **Notification** | An outbound, *non-blocking* message from the system to a user (status, escalation summary, completion). The user is not required to respond. |
+| **Mailbox** | The **per-user** bidirectional channel carrying Questions/Notifications out and Answers/Instructions in. The external API surface (§4). |
+| **Principal / `ExternalUserId`** | The authenticated identity of an external user. A *separate principal type* from `AgentId` (`00` §7); every Instruction/Goal/Question/Answer/Notification is tagged with the principal it belongs to. Authentication owned by `08`. |
+| **Authorization scope** | The set of goals, budget ceilings, and questions a given principal is permitted to set, raise, or answer. Issued/checked per `08`; *consumed* here to admit or reject instructions and answers, and to scope Step-1 "existing inputs". |
 
 ### 2.2 Guardian responsibilities recap
 
-Guardians sit at the top of the checks-and-balances cycle (`00` §3): **Guardians propose → Genesis disposes**. Within the Interaction plane a Guardian is a state machine that owns one user's intent thread (multi-user is parked, §5). It:
+Guardians sit at the top of the checks-and-balances cycle (`00` §3): **Guardians propose → Genesis disposes**. Within the Interaction plane a Guardian is a state machine **keyed by principal**: it owns one `ExternalUserId`'s intent thread, that user's per-user mailbox, and the enforcement of that user's authorization scopes. Multiple users' threads run concurrently; a Guardian instance is always acting *on behalf of a specific principal* and stamps every artifact it produces with that `ExternalUserId`. It:
 
+- admits an Instruction or Answer only if it falls within the submitting principal's authorization scope (which goals/budgets that user may set or answer for; scopes issued/checked per `08`), rejecting or down-scoping otherwise;
 - ingests Instructions and normalizes them to Goals;
 - maintains the mapping `Goal → Setpoint` consumed by `03`;
 - receives ambiguity reports from *any* agent in the system (a Worker hitting an unclear requirement, a Genesis member unsure how to vote, the PID controller unable to interpret an error) and runs the resolution gate (§2.3);
@@ -99,7 +104,7 @@ This is the heart of the plane and is honored precisely from the bootstrap. When
                                  └─────────────────────────────┘
 ```
 
-- **Step 1 — auto-resolve from existing context.** Before any question reaches the human, the system consults the **council / Guardians** to check whether the user's *existing inputs* already determine the answer. "Existing inputs" means: prior instructions, previously answered questions, the active Goal and its setpoint, and accepted commits in the progress layer. This is a deliberative read-only query — it produces a *candidate resolution* with a confidence — and it is itself decorrelation-friendly (multiple Guardians/Genesis members can be consulted; see `02`). If the existing context resolves the ambiguity above a confidence threshold, the resolution is recorded (as a Guardian proposal so it enters the immutable history) and the blocked work is **unblocked without ever interrupting the user**.
+- **Step 1 — auto-resolve from existing context.** Before any question reaches the human, the system consults the **council / Guardians** to check whether the *existing inputs* already determine the answer. **"Existing inputs" is scoped to the relevant user and goal**: it means the prior instructions and previously-answered questions *of the principal(s) authorized over the goal under question*, the active Goal and its setpoint, and accepted commits in that goal's progress sub-graph. One user's private intent thread does not silently resolve another user's ambiguity; only inputs in scope for the gated goal count. This is a deliberative read-only query — it produces a *candidate resolution* with a confidence — and it is itself decorrelation-friendly (multiple Guardians/Genesis members can be consulted; see `02`). If the in-scope context resolves the ambiguity above a confidence threshold, the resolution is recorded (as a Guardian proposal so it enters the immutable history) and the blocked work is **unblocked without ever interrupting the user**.
 - **Step 2 — escalate to the user.** Only if Step 1 fails does a `Question` reach the human. The Guardian authors a typed Question, **links it to the specific progress-layer node it gates**, and emits it on the Mailbox. The gated work — and only the gated work — **blocks until answered** (§2.4). Unrelated work continues.
 
 The gate is what makes user attention scarce-by-construction: the human is interrupted only for ambiguities that their own prior inputs genuinely cannot settle.
@@ -110,9 +115,16 @@ Blocking is **scoped, not global**. A Question gates a *specific* unit of work, 
 
 - the gated node (and its transitive dependents in the task graph) is in a `Blocked` state and does not advance;
 - every other node in the progress layer continues normally;
-- the PID controller (`03`) sees the blocked node as *stalled-by-design*, not as divergence or failure — a blocked node contributes to a distinct `blocked` accounting, not to the `progress` error term as drift (see §6 and `03`).
+- the PID controller (`03`) sees the blocked node as *stalled-by-design*, not as divergence or failure — a blocked node contributes to a distinct `blocked` accounting, not to the `progress` error term as drift (see §7 and `03`).
 
 When the Answer arrives, the Guardian records it (as a proposal that writes the resolution into the progress layer), the gating edge is removed, the node transitions `Blocked → Ready`, and execution resumes. The Answer is also retained as a new "existing input," so future Step-1 auto-resolutions can draw on it — answering a question once should prevent the system from ever asking an equivalent question again.
+
+**Timeouts are tiered by blast radius.** A `Question` must not block its node *forever* when the work is cheap and recoverable, but must *never* be auto-defaulted when the work is dangerous. The deadline behavior is therefore tiered by the blast radius of the gated work:
+
+- **Low-stakes / reversible work** — work that is cheap, reversible, and below a significant-budget threshold **proceeds after a deadline** using the Step-1 best auto-resolution candidate (the one whose `confidence` sat just below the auto-resolve threshold). It proceeds **reversibly** and **emits a Notification** so the user can see, and undo, what was chosen in their absence. Liveness is preserved.
+- **High-stakes work** — work that is **constitutional** (`00` §6), **irreversible**, or carries **significant budget** **blocks indefinitely** until a human answers. There is no auto-default here; the safest reading of the bootstrap ("do not proceed until answered") is honored exactly where it matters.
+
+The blast-radius classification is derived from the gated node's properties (reversibility, budget magnitude, whether it touches kernel/constitutional state) and is recorded on the `Question` so the tier is auditable.
 
 ### 2.5 Escalations as a Mailbox boundary
 
@@ -129,18 +141,19 @@ In both cases the Interaction plane is doing its job: translating an internal co
 
 ### 3.1 The Guardian intake state machine
 
-Each Instruction is processed by a Guardian as follows:
+Each Instruction is processed by a Guardian **on behalf of the submitting principal** (`ExternalUserId`). The state machine is *per-principal*: each transition is stamped with the principal, and the machine runs concurrently and independently for every active user.
 
 ```
-RECEIVED ──normalize──▶ NORMALIZED ──ambiguity?──▶ GATED ──┬─[Step1 resolves]─▶ PROPOSED
-   │                        │                              │
-   │                        └──[no ambiguity]──────────────┘
-   │                                                       └─[Step2]─▶ AWAITING_USER ──answer──▶ PROPOSED
-   ▼
- (InstructionId assigned, persisted, ack'd on the Mailbox)
+                  ┌─[scope OK]─▶ RECEIVED ──normalize──▶ NORMALIZED ──ambiguity?──▶ GATED ──┬─[Step1 resolves]─▶ PROPOSED
+ (instr, principal)│                  │                       │                              │
+ ──ADMIT(scope)────┤                  │                       └──[no ambiguity]──────────────┘
+                  │                  ▼                                                       └─[Step2]─▶ AWAITING_USER ──answer──▶ PROPOSED
+                  └─[denied]─▶ REJECTED      (InstructionId + ExternalUserId assigned, persisted, ack'd on the user's Mailbox)
+                              (Notification)
 ```
 
-1. **RECEIVED.** The Instruction is assigned an `InstructionId`, time-stamped with `LogicalTime` (`01`), and acknowledged. It is immutable.
+0. **ADMIT.** The Instruction arrives bound to an authenticated `ExternalUserId`. The Guardian checks it against that principal's **authorization scope** (which goals/budgets the user may set; per `08`). If out of scope it is `REJECTED` with a Notification on the user's mailbox; otherwise it enters `RECEIVED`.
+1. **RECEIVED.** The Instruction is assigned an `InstructionId`, stamped with its submitting `ExternalUserId`, time-stamped with `LogicalTime` (`01`), and acknowledged. It is immutable.
 2. **NORMALIZED.** The Guardian produces a candidate `Goal`. Normalization is an LLM-backed step but its *output is typed* (per `00` §6.1, constrain the output space): the Guardian must emit a schema-valid `Goal`, not prose. The instruction text is preserved on the Goal as provenance.
 3. **Ambiguity check.** The Guardian scans the Goal for ambiguity (and downstream agents may later raise ambiguity against work derived from it). Each ambiguity enters the two-step gate (§2.3).
 4. **GATED → resolution.** Step 1 may auto-resolve. Otherwise Step 2 surfaces a Question and the Guardian parks the affected work in `AWAITING_USER`.
@@ -160,11 +173,11 @@ The mapping is owned by the Guardian but *consumed* by `03`; the schema of the s
 
 ### 3.3 Mailbox internals
 
-The Mailbox is modeled as two append-only, content-addressed logs plus a derived index:
+The Mailbox is **per-user**: each principal has its own pair of logs and its own derived index, all keyed by `ExternalUserId`. A user sees only their own mailbox; the system addresses an outbound item to a specific principal. Concretely the Mailbox is modeled as, *per principal*, two append-only, content-addressed logs plus a derived index:
 
-- **Outbound log** — Questions and Notifications, in emission order.
-- **Inbound log** — Answers and Instructions, in arrival order.
-- **Open-question index** — the derived set of Questions with no matching Answer, each carrying its gating edge into the progress layer.
+- **Outbound log** — Questions and Notifications addressed to this user, in emission order.
+- **Inbound log** — Answers and Instructions from this user, in arrival order.
+- **Open-question index** — the derived set of this user's Questions with no matching Answer, each carrying its gating edge into the progress layer. The index is **keyed by `(ExternalUserId, QuestionId)`** so the tenancy dimension is explicit and one user's open questions never leak into another's surface. A single underlying ambiguity that gates several users' work fans out to one entry per recipient (see §3.6).
 
 ```
         SYSTEM                         MAILBOX                        USER
@@ -205,6 +218,8 @@ A Question carries a **gating edge**: `gates: Hash` pointing at the progress-lay
 - answering or closing a Question clears the block;
 - a Question may be **superseded** if a later auto-resolution (Step 1, drawing on a newer input) settles it before the user answers — in which case it is `CLOSED` with reason `auto_resolved_late` and a Notification is sent so the user is not left answering a stale question.
 
+**A user Answer always wins over a late auto-resolution.** If the user submits an Answer while a late Step-1 auto-resolution is racing to settle the same Question, the human is authoritative: the Answer is applied (and, if the auto-resolution had already committed a *reversible* resolution, it is reverted in favor of the Answer), and a Notification records the correction. The human is never overruled by the machine on their own question.
+
 ### 3.5 Worked sequence — ambiguity from a Worker
 
 ```
@@ -228,6 +243,28 @@ Worker        Guardian                Council/Guardians       Mailbox        Use
 
 Contrast: had a prior instruction said "optimize p99 response time," Step 1 would have auto-resolved `fast = latency`, recorded the resolution, and unblocked the Worker **without** the Mailbox/User columns ever activating.
 
+### 3.6 Question deduplication & fan-out
+
+Several agents may independently raise the *same* ambiguity (e.g. multiple Workers all confused by "fast"), and the same underlying ambiguity may gate work belonging to more than one user. Surfacing N near-identical Questions would burn the scarcest resource — user attention — so Guardians **coalesce** before escalating:
+
+1. **Cluster** incoming `AmbiguityReport`s by **semantic similarity**, run **through the decorrelated council** (the same `02` machinery Step 1 uses, so the clustering judgment is itself decorrelation-hardened rather than a single LLM's call).
+2. **Raise one Question** per cluster.
+3. **Fan its single Answer back** to *every* gated node in the cluster, unblocking them all at once.
+
+Clustering uses a **conservative similarity threshold**: it is biased toward *not* merging, because a false merge (two genuinely-different ambiguities collapsed into one) means one of them is answered wrong. The conservative threshold *bounds* but does not eliminate that risk (see §6 Open questions).
+
+**Fan-out across users.** When a coalesced Question gates work for multiple principals, the single Question is projected into **each affected user's mailbox** (one open-question-index entry per recipient, §3.3). Who is *authorized to answer* is governed by per-user scopes (`08`); when more than one authorized user could answer the same shared question — or issues a conflicting instruction on a shared goal — arbitration follows the routing rules of §3.7, with the cross-user arbitration *policy* itself still open (§6).
+
+### 3.7 Reconciling a new instruction with committed state — route by magnitude
+
+A new Instruction may conflict with intent the user already expressed, or with already-committed progress (`01`), or with another user's instruction on a shared goal. The Guardian **routes by the magnitude of the conflict** rather than treating every conflict the same way:
+
+- **Small conflict → treat as an ambiguity.** The discrepancy is minor / locally reconcilable: route it into the two-step gate (§2.3) as an `AmbiguityReport` and let Step-1 context (or, failing that, a Question) settle it.
+- **Medium conflict → a new Goal version.** The instruction is a genuine revision of intent: mint a **new `Goal` version** (§3.2), producing a clean **setpoint step** at a `LogicalTime` boundary that feeds the PID controller (`03`) as a reference change rather than a mid-flight mutation.
+- **Large conflict → a proposal to revert.** The instruction contradicts committed progress so fundamentally that the right action is to undo it: author a **proposal to revert** (`02`) the offending committed state, which the Genesis council disposes of like any other proposal.
+
+Cross-user conflicts on a *shared* goal use the same magnitude routing, but *which* user's instruction prevails when several authorized principals contradict each other is a governance/values decision deferred to §6.
+
 ---
 
 ## 4. Interfaces & schemas
@@ -241,11 +278,24 @@ type InstructionId = Hash;   // content address of the raw instruction
 type GoalId        = Hash;
 type QuestionId    = Hash;
 
+/// External-user principal — a SEPARATE principal type from AgentId (00 §7).
+/// It is NOT public-key-derived internal identity; authentication is owned by 08.
+type ExternalUserId = Hash;  // stable handle to an authenticated external user
+
+/// What a principal is permitted to set or answer for. Issued/checked per 08;
+/// CONSUMED here to admit instructions/answers and to scope Step-1 "existing inputs".
+struct AuthorizationScope {
+    principal: ExternalUserId,
+    goals: GoalSelector,         // which goals this user may set / revise / answer for
+    budget_ceiling: Budget,      // max budget this user may commit via a goal/answer
+    may_answer: QuestionSelector,// which questions this user may authoritatively answer
+}
+
 /// Raw, immutable user directive — the only free text the system accepts.
 struct Instruction {
     id: InstructionId,
     body: Text,                  // raw natural language
-    submitter: ExternalUserId,   // external identity; mapped to no AgentId — see 08
+    submitter: ExternalUserId,   // external principal; NOT an AgentId — see 08
     received_at: LogicalTime,
     in_reply_to: Option<QuestionId>, // set if this instruction is actually an Answer payload
 }
@@ -296,10 +346,13 @@ struct ContextResolution {
 struct Question {
     id: QuestionId,
     author: AgentId,             // the Guardian
+    recipients: Vec<ExternalUserId>, // whose mailbox(es) this surfaces in (fan-out, §3.6)
     gates: Hash,                 // progress-layer node this Question blocks (01)
     prompt: Text,
     options: Option<Vec<Text>>,  // closed-form if known; else free-form answer
     origin: QuestionOrigin,      // Ambiguity | ConsensusEscalation | ControlEscalation
+    blast_radius: BlastRadius,   // tier governing timeout behavior (§2.4)
+    cluster: Option<Hash>,       // coalescing cluster id, if deduped (§3.6)
     raised_at: LogicalTime,
     state: QuestionState,        // Draft | Open | Answered | Closed
 }
@@ -307,6 +360,12 @@ struct Question {
 enum QuestionOrigin { Ambiguity, ConsensusEscalation, ControlEscalation }
 enum QuestionState  { Draft, Open, Answered, Closed(CloseReason) }
 enum CloseReason    { Answered, AutoResolvedLate, Superseded, Withdrawn }
+
+/// Blast-radius tier of the gated work; decides timeout behavior (§2.4).
+enum BlastRadius {
+    LowStakesReversible, // proceeds after a deadline w/ Step-1 best candidate, reversibly + Notification
+    HighStakes,          // constitutional / irreversible / significant-budget: BLOCKS indefinitely
+}
 
 /// The user's reply. Unblocks the gated node and becomes a new "existing input."
 struct Answer {
@@ -318,6 +377,7 @@ struct Answer {
 
 /// Outbound, non-blocking message. User need not respond.
 struct Notification {
+    recipient: ExternalUserId,   // whose per-user mailbox this lands in (§3.3)
     subject: Text,
     body: Text,
     severity: Severity,          // Info | Warning | ActionSuggested
@@ -331,7 +391,11 @@ struct Notification {
 ```rust
 /// The Interaction-plane contract. Implemented by Guardian agents.
 trait GuardianInteraction {
-    /// Intake: accept and persist a raw instruction.
+    /// Admit (ADMIT step, §3.1): check a principal's authorization scope before
+    /// accepting an instruction/answer. Scopes are issued/checked per 08.
+    fn authorize(&self, who: ExternalUserId, what: &Instruction) -> AdmitDecision; // Admit | Reject
+
+    /// Intake: accept and persist a raw instruction (after authorize()).
     fn submit_instruction(&self, body: Text, submitter: ExternalUserId) -> InstructionId;
 
     /// Normalize an instruction into a typed Goal (output is schema-validated).
@@ -340,8 +404,9 @@ trait GuardianInteraction {
     /// Derive/maintain the PID setpoint from a goal (consumed by 03).
     fn setpoint(&self, goal: GoalId) -> Setpoint;
 
-    /// STEP 1 of the gate: can existing user inputs resolve this ambiguity?
-    /// Consults the council/Guardians; returns Some(resolution) iff confident.
+    /// STEP 1 of the gate: can existing inputs IN SCOPE FOR THE GATED GOAL
+    /// resolve this ambiguity? Consults the council/Guardians; "existing inputs"
+    /// is scoped to the authorized principal(s)/goal (§2.3). Some(_) iff confident.
     fn try_auto_resolve(&self, a: &AmbiguityReport) -> Option<ContextResolution>;
 
     /// STEP 2 of the gate: surface a Question and block the gated node.
@@ -358,7 +423,7 @@ trait GuardianInteraction {
 
 ### 4.4 External API surface
 
-The Interaction plane is also the **external boundary**. These are the operations available to a user-facing client (CLI, web, agent). Authentication and external-identity binding are deferred to `08` (§5); shapes are illustrative (REST-flavored, but transport-agnostic).
+The Interaction plane is also the **external boundary**. These are the operations available to a user-facing client (CLI, web, agent). **Every call is made by an authenticated `ExternalUserId`** and is scoped to that principal: instructions are admitted only within the caller's authorization scope, and the notification/question endpoints read only the caller's per-user mailbox. Authentication, identity binding, and scope issuance are deferred to `08` (§5 decision 2); shapes are illustrative (REST-flavored, but transport-agnostic).
 
 **(a) Submit an instruction.**
 
@@ -417,21 +482,30 @@ Answering is idempotent per `question_id`: a second answer to an already-`Answer
 
 ---
 
-## 5. Open questions & ambiguities
+## 5. Resolved decisions
 
-Per `00` §9, surfaced ambiguities are parked here, not silently decided.
+A design review resolved most of this plane's original open questions. The following are now **normative** design and govern the body above; they are recorded here so the rationale and the prior alternatives remain auditable (`00` §6.6).
 
-1. **One user or many?** This spec assumes a *single* external user with a single intent thread per Guardian. Multiple concurrent users — shared goals, conflicting instructions, per-user mailboxes, authorization to answer another user's question — are unresolved. If multi-user, the Guardian state machine (§3.1) and the open-question index (§3.3) need a tenancy dimension, and "existing inputs" in the Step-1 gate must be scoped to whose inputs count.
-2. **External identity vs internal `AgentId`.** `ExternalUserId` is intentionally *not* an `AgentId` (`00` §7: `AgentId` is a public-key-derived identity for internal agents). How external users authenticate, how their identity binds to a session, and whether an external user can be granted any internal trust are all **deferred to `08-trust-and-security.md`**. This spec only assumes a stable `ExternalUserId` exists and that the submitter of an Answer can be checked.
-3. **Timeouts on unanswered questions.** A `Question` can stay `Open` indefinitely, blocking its node forever. Should there be a timeout? If so, may the system **proceed with a default**? Candidates: (a) never proceed (current default — honors "do not proceed until answered" literally); (b) proceed with the Step-1 best candidate (its `confidence` was just below threshold) after a deadline, emitting a Notification; (c) escalate severity and keep blocking. The safest reading of the bootstrap is (a), but (b) may be necessary for liveness. Parked.
-4. **Deduplicating near-identical questions.** Multiple agents may independently raise the *same* ambiguity (e.g. several Workers all confused by "fast"). Surfacing N near-identical Questions would burn user attention. We need a dedup/coalescing policy: cluster `AmbiguityReport`s by semantic similarity, raise *one* Question, and fan its single Answer back out to every gated node. The clustering is itself LLM-backed and therefore nondeterministic — does coalescing run through the council (decorrelated), and what is the false-merge risk (two genuinely different ambiguities merged, so one is answered wrong)? Parked.
-5. **Auto-resolve confidence threshold.** Step 1 turns on a confidence threshold separating "auto-resolve silently" from "ask the user." Where is it set, is it per-goal tunable, and does it interact with the PID controller (e.g. tighten the threshold when divergence is already high)? Calibrating this trades user-interruption rate against silent-misinterpretation rate. Parked; relates to reputation/calibration in `08`.
-6. **Late supersession UX.** §3.4 allows a still-`Open` Question to be auto-resolved late by a newer input and `CLOSED(AutoResolvedLate)`. Racing the user (they may be mid-answer) needs a tie-break: does a user Answer always win over a late auto-resolution? Current lean: yes, the human is authoritative. Parked for confirmation.
-7. **Instruction that contradicts an accepted commit.** A new Instruction may conflict with already-committed progress (`01`). Is that an ambiguity (gate it), a new Goal version (setpoint step, §3.2), or a proposal to *revert*? Likely all three depending on magnitude; the routing rule is unspecified. Parked.
+1. **Multi-user is first-class (locked).** Metatron supports **concurrent external users from the start**, not a single intent thread. Each principal has its own intent thread, **per-user mailbox** (§3.3), and **authorization scopes** over which goals/budgets it may set or answer for (§2.2, §4.1). The Guardian state machine (§3.1) and the open-question index (§3.3) carry an explicit **tenancy / principal dimension** (`ExternalUserId`), and Step-1 "existing inputs" are **scoped to the relevant user/goal** (§2.3). Conflicting instructions across users on a *shared* goal are routed per §3.7, with the *arbitration policy* itself still open (§6).
+2. **External identity is a separate principal type.** `ExternalUserId` is **not** an `AgentId` (the latter is internal, public-key-derived; `00` §7). The **authentication mechanism, identity-to-session binding, and scope issuance are owned by `08-trust-and-security.md`**; this plane *assumes* an authenticated `ExternalUserId` and a resolved set of per-user authorization scopes, and consumes them to admit instructions/answers (§2.2, §4.4).
+3. **Timeouts are tiered by blast radius (locked via the liveness fork).** Low-stakes / reversible blocked work **proceeds after a deadline** using the Step-1 best auto-resolution candidate — *reversibly*, emitting a Notification. High-stakes work (constitutional, irreversible, significant budget) **blocks indefinitely** until a human answers. See §2.4 and `BlastRadius` (§4.2).
+4. **Near-identical questions are coalesced.** `AmbiguityReport`s are clustered by semantic similarity **through the decorrelated council**, **one** Question is raised per cluster, and its single Answer **fans back** to every gated node (and every affected user's mailbox). A **conservative clustering threshold** bounds the false-merge risk (§3.6).
+5. **The auto-resolve threshold is per-goal tunable and PID-coupled.** Step 1's confidence threshold is set **per goal** and **tightened when divergence is already high** (coupled to the PID controller, `03`), trading user-interruption rate against silent-misinterpretation rate (relates to calibration in `08`).
+6. **A user Answer always wins over a late auto-resolution.** The human is authoritative: if an Answer races a late Step-1 auto-resolution on the same Question, the Answer is applied and any reversible auto-resolution is reverted in its favor (§3.4).
+7. **Instruction-vs-committed-state is routed by magnitude.** Small conflict → treat as an ambiguity (gate it, §2.3); medium → a new `Goal` version (setpoint step feeding `03`, §3.2); large → a proposal to **revert** (`02`). See §3.7.
 
 ---
 
-## 6. Relationships to other specs
+## 6. Open questions & ambiguities
+
+Per `00` §9, the genuinely-open items are parked here, not silently decided. (Most of this plane's original open questions are now resolved — see §5.)
+
+1. **Cross-user conflict arbitration policy.** When **multiple authorized users issue contradictory instructions on the *same* goal**, §3.7 fixes the *mechanism* (route by magnitude), but *which* principal's intent prevails — seniority, scope precedence, explicit ownership, council adjudication, or a values-weighted rule — is a **governance/values-open** question. Parked.
+2. **Calibrating the question-clustering threshold.** The conservative similarity threshold (§3.6) **bounds but does not eliminate** the false-merge risk of LLM-based clustering (two genuinely-different ambiguities merged, so one is answered wrong). Where exactly to set it is **empirical** — it must be tuned against observed false-merge and over-asking rates (`07`). Parked.
+
+---
+
+## 7. Relationships to other specs
 
 | Spec | Relationship |
 |------|--------------|
@@ -441,4 +515,4 @@ Per `00` §9, surfaced ambiguities are parked here, not silently decided.
 | **`03-control-loop.md`** | The **Goal defines the setpoint/target state** the PID controller steers toward (§3.2). The Setpoint schema (§4.1) is produced here and consumed there. **Control-loop escalations** (infeasible goal, flatlined progress) surface through the Mailbox. Blocked nodes are reported to `03` as *stalled-by-design*, kept distinct from the `divergence`/`progress` error terms so blocking does not look like failure. |
 | **`04-runtime-and-harness.md`** | Workers (running under harnesses) are the most frequent *raisers* of `AmbiguityReport`s (§3.5). A raised ambiguity pauses that Worker's unit of work; the Answer/resolution resumes it. |
 | **`07-observability.md`** | The Mailbox logs (§3.3) and question lifecycle (§3.4) are a telemetry source: interruption rate, auto-resolve hit-rate, mean time-to-answer, and blocked-node counts are observability signals. Sentinels may watch for Guardians over-interrupting the user (a drift signal). |
-| **`08-trust-and-security.md`** | Owns the unresolved external-identity questions (§5.2): how `ExternalUserId` authenticates, how answer-authorization is checked, and the external-vs-internal trust boundary. The Mailbox is the system's outermost trust boundary. |
+| **`08-trust-and-security.md`** | Owns external identity & authorization (§5 decision 2): how `ExternalUserId` authenticates, how its session binds, how per-user **authorization scopes** are issued, and how answer-authorization is checked — the external-vs-internal trust boundary. This plane *assumes* an authenticated `ExternalUserId` and resolved scopes and consumes them; `08` defines how they come to be. The Mailbox is the system's outermost trust boundary. |

@@ -50,7 +50,7 @@ The agent-JIT exists to **collapse that waste to determinism wherever it is safe
 | Type feedback / observed types | Observed **input→action** samples: `(canonicalized input, harness action, confidence)` traces | The empirical behavior record. |
 | Inline cache (monomorphic) | **Tier-1 memoized policy**: cache keyed by canonicalized input → action | "We've seen this exact shape; reuse the answer." |
 | Polymorphic inline cache (PIC) | Tier-1 cache with **k>1 input clusters**, each with its own cached action + guard | Few stable behaviors over an input partition. |
-| Megamorphic call site → give up, stay in interpreter | Decision site that **never clusters** (high entropy) → stays Tier 0 permanently | Inherently context-dependent agents (see Open Q). |
+| Megamorphic call site → give up, stay in interpreter | Decision site that **never clusters** (high entropy) → stays Tier 0 permanently | Inherently context-dependent agents; capped + pinned per §7 RD-4. |
 | Baseline JIT (quick, cheap compile) | **Tier 1** (memoize observed behavior; no synthesis) | Cheap to build, broad coverage, conservative. |
 | Optimizing JIT (slow, aggressive compile) | **Tier 2** (synthesize deterministic code where behavior is provably/empirically regular) | Expensive to build, narrow, maximal payoff. |
 | Guard (type check before fast path) | **Trap / deopt guard**: a predicate that must hold for the compiled path to be valid | If it fails, fall to a lower tier. |
@@ -90,7 +90,7 @@ The tiers form a **total fallback order**: `Tier2 ⊐ Tier1 ⊐ Tier0`. A deopt 
 
 The unit of compilation is the **decision site**, not the agent. An agent may be Tier 2 at one decision site (the formatting step it does identically every time) and Tier 0 at another (the genuinely novel judgment) within the same task. This mirrors how a JIT compiles individual hot methods/loops, not whole programs.
 
-A decision site is identified by a **canonicalization function** that maps a raw `(TaskSpec, Context)` to a stable key by stripping irrelevant variation (timestamps, ids, ordering, whitespace) and bucketing semantically-equivalent inputs. Canonicalization is the analogue of a JIT's *type feedback shape*: it defines what "the same situation" means, and therefore what the cache key and the guard domain are. **Canonicalization soundness is a load-bearing assumption** — a canonicalizer that collapses two inputs the agent would treat differently introduces silent divergence. (Parked in Open Questions: how canonicalizers themselves are validated.)
+A decision site is identified by a **canonicalization function** that maps a raw `(TaskSpec, Context)` to a stable key by stripping irrelevant variation (timestamps, ids, ordering, whitespace) and bucketing semantically-equivalent inputs. Canonicalization is the analogue of a JIT's *type feedback shape*: it defines what "the same situation" means, and therefore what the cache key and the guard domain are. **Canonicalization soundness is a load-bearing assumption** — a canonicalizer that collapses two inputs the agent would treat differently introduces silent divergence. The canonicalizer is therefore itself a synthesized, shadow-validated artifact held to the same equivalence discipline (§7 RD-5).
 
 ```rust
 /// Reduces raw harness inputs to a stable decision-site key + a feature vector
@@ -118,7 +118,7 @@ Guard taxonomy:
 
 | Guard type | Fires when | Analogy | Deopts to |
 |---|---|---|---|
-| **`ConfidenceGuard`** | The compiled path's (or originating observation's) confidence < threshold | Speculative-type check on a weakly-typed feedback | Tier 0 |
+| **`ConfidenceGuard`** | The compiled path's (or originating observation's) confidence < threshold (calibrated + reputation-weighted per harness, §7 RD-6) | Speculative-type check on a weakly-typed feedback | Tier 0 |
 | **`NoveltyGuard` (OOD)** | Input falls outside the observed distribution / cluster domain (`features` exceed a learned boundary) | Uncommon trap / never-taken branch | Tier 0 |
 | **`InvariantGuard`** | A declared pre/postcondition or type invariant on input or output is violated | Assertion / safepoint check | Tier 1 or 0 |
 | **`PreconditionGuard`** | A Tier-2 synthesized rule's explicit precondition does not hold for this input | Guard before an inlined fast path | Tier 1 |
@@ -219,7 +219,7 @@ struct StabilityStats {
 }
 ```
 
-A site is a **Tier-1 candidate** when `consistency ≥ τ_c1`, `mean_confidence ≥ τ_conf`, and `arity ≤ k_max`. It is additionally a **Tier-2 candidate** when the stable behavior is *regular enough to synthesize and equivalence-check* — i.e. the input→action map admits a compact, total-over-its-guarded-domain functional form that survives held-out replay (§6.3). These thresholds are tunable and are themselves a control surface (Open Q: who owns them).
+A site is a **Tier-1 candidate** when `consistency ≥ τ_c1`, `mean_confidence ≥ τ_conf`, and `arity ≤ k_max`. It is additionally a **Tier-2 candidate** when the stable behavior is *regular enough to synthesize and equivalence-check* — i.e. the input→action map admits a compact, total-over-its-guarded-domain functional form that survives held-out replay (§6.3). Rather than tripping on fixed `τ`'s, readiness is decided by a **bounded, Sentinel-learned sequential test** over the OOD boundary and outcome consistency (§7 RD-3); a site whose test fails to converge is capped and pinned to Tier 0 (§7 RD-4).
 
 ### 3.4 Tier-1 synthesis (the inline cache / PIC)
 
@@ -244,7 +244,7 @@ struct InlineCacheEntry {
 
 Execution at Tier 1: canonicalize → if `key` is in `key_index` **and** all guards pass → return the cached action (a **hit**, ~0 tokens). Otherwise **trap** (a **miss**: novel key, OOD features, low confidence, or stale context) → **deopt to Tier 0**, run the harness, and feed the fresh observation back so the cache can grow. This is precisely inline-cache fill-on-miss.
 
-A PIC (k>1) just dispatches over clusters: pick the cluster whose `domain` contains `features`; if none contains it → `NoveltyGuard` fires → deopt. Megamorphic sites are never built (§3.3).
+A PIC (k>1) just dispatches over clusters: pick the cluster whose `domain` contains `features`; if none contains it → `NoveltyGuard` fires → deopt. Megamorphic sites are never built (§3.3); a PIC whose `arity` exceeds `k_max` (default 4–6) with no dominant cluster is treated as effectively megamorphic and demoted to Tier 0 (§7 RD-8).
 
 ### 3.5 Tier-2 synthesis (the optimizing compiler)
 
@@ -426,7 +426,7 @@ Demote a site **down** a tier (a *deliberate* tier change, distinct from a singl
 - **Distribution shift** — the input distribution moved outside the compiled domain (sustained `NoveltyGuard` firing), so coverage collapsed and the OOD boundary no longer reflects reality.
 - **Shadow divergence** — canary sampling (§6.2) shows Tier-2 ≠ Tier-0 beyond tolerance: an actual equivalence failure. This is the most serious signal and triggers **immediate** demotion to Tier 0 + invalidation of the artifact.
 
-Demotion is to the *adjacent* lower tier by default (Tier2→Tier1) unless the trigger is a correctness/equivalence failure, in which case it goes straight to **Tier 0** (the only tier guaranteed correct). Demotion, like promotion, is a committed `TierChange` (§4.4) — except *emergency* demotions on shadow-divergence may take effect immediately and be ratified retroactively (Open Q: emergency-demote authority).
+Demotion is to the *adjacent* lower tier by default (Tier2→Tier1) unless the trigger is a correctness/equivalence failure, in which case it goes straight to **Tier 0** (the only tier guaranteed correct). Demotion, like promotion, is a committed `TierChange` (§4.4) — except *emergency* demotions on shadow-divergence or trap storms take effect immediately and are ratified after the fact; if ratification rejects, the correction is a forward re-promotion, never a literal rollback (§7 RD-7).
 
 ### 5.4 Who authorizes a tier change?
 
@@ -436,7 +436,9 @@ A tier change mutates the configuration layer, and the taxonomy forbids an agent
 - The **Compiler** synthesizes the policy, runs equivalence/shadow checks, and authors a `TierChange` proposal (it *proposes*, like a Guardian).
 - **Genesis** disposes — the consensus protocol (`02`) accepts/rejects, and on acceptance the change is committed and signed.
 
-This keeps *propose ≠ dispose* intact even inside the JIT. **Demotions for safety** are the deliberate exception: a `DivergenceGuard`/shadow-divergence demotion is a *fail-safe* and may execute autonomously and immediately (deopt to Tier 0 always being safe-by-construction, §3.6), with a ratifying commit recorded after the fact. The precise authority gradient — which tier changes are autonomous Compiler/Sentinel actions vs. which require a consensus proposal, and the threshold for each — is parked in Open Questions (§6 of `00-overview` sets ⅔ ordinary / ¾ constitutional as the defaults a policy would draw on).
+This keeps *propose ≠ dispose* intact even inside the JIT. **Demotions for safety** are the deliberate exception: a `DivergenceGuard`/shadow-divergence demotion is a *fail-safe* and may execute autonomously and immediately (deopt to Tier 0 always being safe-by-construction, §3.6), with a ratifying commit recorded after the fact.
+
+The authority gradient is now committed (§7 RD-1): **autonomy scales with blast radius.** Tier-1 inline-cache fills are autonomous (low stakes); Tier-2 synthesis requires a consensus proposal (`02`); emergency safety demotions act autonomously and are ratified afterward. (§6 of `00-overview` sets ⅔ ordinary / ¾ constitutional as the consensus defaults a Tier-2 proposal draws on.)
 
 ---
 
@@ -487,7 +489,7 @@ struct EquivalenceCertificate {
 }
 ```
 
-The certificate is content-addressed and referenced by the `TierChange` (§4.4), so the basis for every promotion is itself in the Merkle history and re-checkable. *What "equivalence" of an LLM action and synthesized code even means* — exact match? semantic distance? identical downstream task outcome? — is genuinely open and parked below.
+The certificate is content-addressed and referenced by the `TierChange` (§4.4), so the basis for every promotion is itself in the Merkle history and re-checkable. The *contract* of equivalence is committed (§7 RD-2): the compiled output must lie in the **high-probability support of Tier-0's action distribution** under the `EquivalenceMetric`, validated by shadow execution — not an exact point match, since Tier-0 is itself a distribution. The *precise* metric and threshold (exact action vs. downstream outcome, what distance) remain a research question (§8a).
 
 ### 6.4 Audit trail in the Merkle history
 
@@ -511,21 +513,44 @@ Because tier is configuration-layer state (§4.4):
 
 ---
 
-## 7. Open questions & ambiguities
+## 7. Resolved decisions
 
-1. **Proving behavioral equivalence of an LLM agent and synthesized code.** What does "equivalent" *mean* for a stochastic policy and a deterministic function — exact action match, semantic/embedding distance under a threshold, or identical *downstream task outcome*? Each gives a different `EquivalenceMetric` and a different safety story. Tier-0 itself is nondeterministic, so the target is a *distribution*, not a point; is the right contract "the compiled answer lies in the high-probability support of Tier-0's action distribution"? Unresolved.
-2. **How much observation is "enough" to compile safely?** The window size / coverage / consistency thresholds (§3.3) trade premature compilation (unsafe) against missed savings (wasteful). Is there a principled stopping rule (e.g. PAC-style sample-complexity bound on the OOD boundary, or a sequential test) rather than hand-tuned `τ`'s? Who owns these thresholds — are they constants, Sentinel-learned, or a control surface the PID itself tunes?
-3. **Agents whose correct behavior is inherently context-dependent and never stabilizes.** Some Workers *should* stay megamorphic forever (genuinely novel judgment every time). The design says "stay Tier 0," but detecting "will never stabilize" vs. "has not stabilized yet" is itself a hard inference. Is there a cost to repeatedly *attempting* and aborting compilation on such sites?
-4. **Who authorizes a tier change — consensus proposal vs. autonomous Compiler/Sentinel action?** §5.4 routes promotions through Genesis consensus and lets safety demotions be autonomous-and-ratified. But is a Tier-1 inline-cache fill low-stakes enough to be fully autonomous (like a JIT just doing its job), while Tier-2 synthesis is high-stakes enough to require a vote? Where exactly is the authority line, and should it scale with the blast radius of the compiled site?
-5. **Canonicalizer soundness.** Everything rests on canonicalization correctly defining "the same situation" (§2.3). A canonicalizer that over-collapses inputs is a *silent* source of divergence that guards may not catch (because the two inputs look identical to the guard). How is a canonicalizer itself validated/synthesized, and is it subject to the same equivalence discipline?
-6. **Confidence calibration provenance.** Guards lean on harness self-reported `confidence`, which is itself an unreliable LLM output. How much can the JIT trust it before calibration against ground truth (`08`) is established? Should `ConfidenceGuard` thresholds be reputation-weighted per harness?
-7. **Emergency-demote authority and rollback semantics.** Autonomous shadow-divergence demotion executes before consensus ratifies it (§5.3). What if ratification later *rejects* the demotion? Can a tier change be "rolled back" given the history is append-only, and does a contested emergency action affect the Compiler's/Sentinel's reputation?
-8. **Polymorphic explosion.** When does a growing PIC (rising `arity`) tip from "worth maintaining k clusters" to "effectively megamorphic, demote to Tier 0"? The threshold `k_max` is currently hand-set.
-9. **Cross-agent / cross-site sharing of compiled policies.** Two Workers with the same role+goal may converge on the same stable behavior. Can a compiled policy be *shared* (content-addressed, so deduplication is natural) or is behavior identity-bound? Sharing multiplies savings but couples agents.
+A design review committed the following as **normative** design. They are written here as decided, not deliberative; the remaining genuinely-open items (now narrowed to research questions) follow in §8.
+
+1. **Tier-change authority scales with blast radius (LOCKED FORK, resolving former Open Q on authority).** Autonomy is granted in proportion to stakes:
+   - **Tier-1 inline-cache fills are autonomous.** Filling a cache entry on miss is low-stakes (deopt-to-Tier-0 is always safe-by-construction, §3.6) and the Compiler/Sentinel MAY perform it without a consensus proposal — the JIT "just doing its job," exactly like a baseline JIT filling an inline cache.
+   - **Tier-2 deterministic-code synthesis REQUIRES a consensus proposal.** Promotion to a synthesized artifact is high-stakes (it *generalizes* rather than tabulates, §2.2) and MUST be routed as a typed `TierChange` proposal disposed by Genesis (`02`), per §5.4.
+   - **Emergency safety demotions act autonomously, then are ratified.** A shadow-divergence or trap-storm demotion to Tier 0 executes **immediately** as a fail-safe and is ratified by a commit *after the fact* (see RD-7 for the contested-ratification semantics).
+
+2. **Equivalence means distributional containment, validated by shadow execution (resolving former Open Q on equivalence semantics).** A compiled policy is "equivalent" to Tier-0 iff its output lies in the **high-probability support of Tier-0's action distribution**, measured by an `EquivalenceMetric` (a semantic / embedding distance under a threshold), and confirmed empirically by **shadow execution** (§6.2). This is explicitly **not** exact-match: Tier-0 is itself a stochastic policy, so the equivalence target is a *distribution*, not a point. (The *precise* metric/threshold for a stochastic policy vs. deterministic code remains a research question — §8a.)
+
+3. **"Enough observation" is decided by a sequential test, not a fixed window (resolving former Open Q on observation sufficiency).** Promotion readiness is gated by a **SPRT-style sequential test** over the OOD-boundary fit and outcome consistency, promoting when the test crosses a confidence bound — rather than a hand-set window size. The test's thresholds are **Sentinel-learned and bounded** in v1; they are deliberately **not** PID-coupled in v1 (the controller's cost pressure still modulates *whether* to compile per §5.2, but does not tune the statistical bound itself). (A principled stopping rule / sample-complexity bound is still open — §8b.)
+
+4. **A site that never converges is capped and pinned to Tier 0 (resolving former Open Q on never-stabilizing agents).** When the same sequential test (RD-3) **fails** to converge at a site, the system **CAPS compile attempts per site with exponential backoff**, marks the site **"stay Tier 0,"** and **periodically re-evaluates** it (so a site that later stabilizes is not pinned forever). This bounds the cost of repeatedly attempting and aborting compilation on genuinely megamorphic sites. (Distinguishing "will never stabilize" from "has not stabilized yet" remains hard inference — §8c.)
+
+5. **The canonicalizer is itself a synthesized, shadow-validated artifact (resolving former Open Q on canonicalizer soundness).** The `Canonicalizer` (§2.3) is held to the **same equivalence discipline** as any compiled policy: it is synthesized and validated under the equivalence contract (RD-2). Over-collapse — two inputs Tier-0 would treat differently mapped to one key — is caught by **shadow divergence**: Tier-0 is run on inputs the canonicalizer calls "the same" and the outputs are checked. Canonicalizer changes are **recorded state** (content-addressed, in the Merkle history), so the canonicalizer in force for any promotion is auditable and re-checkable.
+
+6. **Harness `confidence` is never trusted raw; it is calibrated and reputation-weighted (resolving former Open Q on confidence provenance).** The JIT MUST NOT consume the harness's self-reported `confidence` directly. Per harness, a **reliability curve** is calibrated against ground truth (`08`), `ConfidenceGuard` thresholds are **reputation-weighted**, and guards are **widened until the curve is calibrated**. An uncalibrated harness is treated conservatively (wider guards ⇒ more traps).
+
+7. **Emergency rollback is forward re-promotion, never literal rollback (resolving former Open Q on emergency-demote semantics).** An emergency demotion **executes immediately** (safety first), is **recorded**, then **ratified**. Because the history is append-only, if ratification later **rejects** the demotion, the correction is a **forward re-promotion** (a new commit), never a literal rollback. A **contested** emergency action is **reputation-neutral** for the acting Compiler/Sentinel unless it is shown to have been **spurious**, in which case it dings the Sentinel's reputation (Principle 4, `08`).
+
+8. **PIC explosion is capped by `k_max`, then demotes to Tier 0 (resolving former Open Q on polymorphic explosion).** The cluster count `k_max` is **tunable (default 4–6)**. A site whose `arity` exceeds `k_max` **with no dominant cluster** is treated as **effectively megamorphic** and **demoted to Tier 0** (§3.3, §3.4).
+
+9. **Compiled policies are content-addressed, so cross-agent sharing dedupes naturally but is correlation-tracked (resolving former Open Q on cross-agent sharing).** Because policy artifacts are content-addressed, two Workers with **identical role + goal + behavior** dedupe to the **same** artifact automatically. Sharing is **ALLOWED** but **correlation-tracked**: a shared policy means the agents running it are correlated, and that correlation is **surfaced to `02`'s decorrelation** machinery (so the consensus plane can account for the coupling, Principle 3).
 
 ---
 
-## 8. Relationships to other specs
+## 8. Open questions & ambiguities
+
+The committed decisions above close the engineering questions. What remains is genuinely open *research*:
+
+- **(a) The precise `EquivalenceMetric` for a stochastic policy vs. deterministic code.** RD-2 fixes the *contract* (distributional containment, shadow-validated), but *what threshold, what distance, and whether to compare exact action vs. downstream outcome* is unresolved and a research question.
+- **(b) A principled stopping rule / sample-complexity bound for "enough observation."** RD-3 fixes the *mechanism* (a bounded sequential test), but a PAC-style sample-complexity bound on the OOD boundary — a principled rather than empirically-tuned stopping rule — remains research.
+- **(c) Distinguishing "will never stabilize" from "has not stabilized yet."** RD-4 fixes the *policy* (cap, back off, pin to Tier 0, re-evaluate), but deciding *which* sites are inherently megamorphic vs. merely not-yet-converged is itself hard inference and a research question.
+
+---
+
+## 9. Relationships to other specs
 
 | Spec | Relationship |
 |---|---|

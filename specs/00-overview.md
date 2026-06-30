@@ -58,7 +58,7 @@ Metatron separates concerns into five planes, echoing the Kubernetes control-pla
 | Execution | Harness orchestration, backends, JIT | `04-runtime-and-harness.md`, `05-agent-jit.md` |
 | Observability | Telemetry that taps every plane | `07-observability.md` |
 
-Trust and identity (signing, reputation, sandboxing, Byzantine response) cut across every plane and are specified in `08-trust-and-security.md`.
+Trust and identity (signing, reputation, sandboxing, Byzantine response, agent identity & external-tool authorization) cut across every plane and are specified in `08-trust-and-security.md`. The separately-deployed **`mcp-auth-proxy`** — the gateway through which agents safely perform privileged external actions without ever holding downstream secrets — is specified in `09-mcp-auth-proxy.md`.
 
 ---
 
@@ -219,10 +219,45 @@ enum Tier {
     Tier2Compiled,      // synthesized deterministic code
 }
 
-// ---- Identity (08) ----
-type AgentId = Hash;       // public-key-derived identity
-struct Signature(/* ... */);
-struct Reputation(f32);    // calibrated, in [0,1]; decays on drift
+// ---- Identity & external-tool authorization (08, 09) ----
+/// Stable long-term identity = hash of the agent's long-term public key,
+/// recorded in the configuration layer. Decoupled from the *rotatable*
+/// operational signing key, so key rotation does not change the AgentId.
+type AgentId = Hash;
+
+/// Crypto-agile, hybrid-composite by default: verification requires BOTH halves.
+enum SigScheme { Ed25519, MlDsa, Hybrid(Box<SigScheme>, Box<SigScheme>) } // default Hybrid(Ed25519, MlDsa)
+struct Signature { scheme: SigScheme, bytes: Vec<u8> }
+struct Reputation(f32);    // calibrated, in [0,1]; class-prior on spawn, decays on drift
+
+/// A quorum of Genesis signatures over a commit. Explicit signer set in v1
+/// (needed for reputation accounting + equivocation detection); BLS/FROST
+/// aggregation is a future optimization behind this stable interface.
+struct QuorumCertificate { signers: Vec<AgentId>, sigs: Vec<Signature>, scheme: SigScheme }
+
+/// SPIFFE Verifiable Identity Document — the short-lived (minutes), auto-rotating
+/// operational credential SPIRE issues after the Metatron workload attestor checks
+/// the agent against the current head (exists, holds key, above rep floor, not quarantined).
+struct Svid {
+    spiffe_id: SpiffeId,         // "spiffe://metatron.<deployment>/agent/<AgentId>/role/<role>"
+    agent_id: AgentId,
+    operational_key: PublicKey,  // rotatable; rotation does NOT change AgentId
+    scopes: Vec<Scope>,          // coarse authorization claims, sourced from the configuration layer
+    not_after: LogicalTime,
+    issuer_chain: CertChain,     // SPIRE intermediate -> genesis threshold-of-founders root CA
+    issuer_sig: Signature,
+}
+struct Scope { resource: McpServerId, methods: Vec<MethodPattern> }
+
+/// External users are a SEPARATE principal type (NOT AgentId). The system is multi-user.
+struct UserPrincipal { id: ExternalUserId, scopes: Vec<AuthorizationScope> }
+
+/// The user-deployed, separately-trusted MCP gateway. Gateway-only: all downstream
+/// MCP calls are brokered through it; agents never receive a downstream token.
+trait McpAuthProxy {
+    fn discover_tools(&self, svid: &Svid) -> ToolList;             // filtered to authorized scopes
+    fn invoke(&self, svid: &Svid, call: McpToolCall) -> McpResult; // brokered; credential injected, never returned
+}
 ```
 
 ---
@@ -255,6 +290,12 @@ struct Reputation(f32);    // calibrated, in [0,1]; decays on drift
 | **Tier / JIT / Trap / Deopt** | Execution tier (0/1/2); compiling stable behavior; a guard; the fallback to a lower tier. |
 | **Constitutional amendment** | A change to kernel-role membership; higher consensus threshold. |
 | **Mailbox** | The notification/question channel between the system and the user. |
+| **External user / `UserPrincipal`** | A human user of the system — a *separate* principal type from `AgentId`. The system is **multi-user**: concurrent users with per-user mailboxes and authorization scopes. |
+| **SVID** | A SPIFFE Verifiable Identity Document: an agent's short-lived, auto-rotating operational credential, issued by SPIRE after the Metatron workload attestor validates it against the current head. |
+| **Workload attestation** | The check (agent exists in config layer, holds its key, above reputation floor, not quarantined) gating SVID issuance — binding the runtime workload to the governed on-chain identity; also the Sybil gate. |
+| **Hybrid-PQ crypto** | Composite classical+post-quantum cryptography: `Ed25519+ML-DSA` signatures, `X25519+ML-KEM` transport. Verification requires both halves. |
+| **`mcp-auth-proxy`** | The user-deployed gateway (its own trust boundary, holding the user's secrets) that brokers all agent calls to external MCP servers. **Gateway-only**: agents never receive downstream tokens. |
+| **Privilege separation** | The principle that an agent's only long-term secret is its identity key, so compromising an agent never compromises standing secrets. |
 
 ---
 
@@ -277,7 +318,13 @@ struct Reputation(f32);    // calibrated, in [0,1]; decays on drift
    │
    ├── 07-observability .......... taps every plane; feeds Sentinels + PID estimators
    │
-   └── 08-trust-and-security ..... identity, signing, reputation, sandboxing, Byzantine response
+   ├── 08-trust-and-security ..... identity, signing, reputation, sandboxing, Byzantine
+   │       │                       response, agent identity & external-tool authorization
+   │       │
+   │       └── 09-mcp-auth-proxy .. user-deployed gateway; gateway-only brokering of
+   │                               privileged external (MCP) actions; no agent-held secrets
+   │
+   └── (00 overview, this file)
 ```
 
 Each subsystem spec follows the same structure: **Purpose → Concepts → Detailed design → Interfaces/schemas → Open questions & ambiguities → Relationships.** The *Open questions* section in each is where surfaced ambiguities are parked and tracked.

@@ -76,7 +76,7 @@ The Execution plane is **declarative**. The configuration layer of the world-mod
 
 ### 2.6 Sessions, tasks, and the work
 
-A **TaskSpec** is the unit of work handed to a harness for one **session**. An agent (a long-lived role) may run *many* sessions over its life — each session is one invocation of its bound harness's agentic loop on one `TaskSpec`. Sessions are where reconciliation and "the work" meet the hardest open problems: a session, once started, runs a vendor loop that may not be cleanly preemptible (§9).
+A **TaskSpec** is the unit of work handed to a harness for one **session**. An agent (a long-lived role) may run *many* sessions over its life — each session is one invocation of its bound harness's agentic loop on one `TaskSpec`. Sessions are where reconciliation and "the work" meet: a session, once started, runs a vendor loop that may not be cleanly preemptible, so each declares a **session class** (cooperative-checkpoint / atomic / force-cancellable) that governs how reconciliation treats it (RD-3, §9).
 
 ---
 
@@ -125,7 +125,7 @@ Design notes:
 
 - **`run` is the whole loop.** It returns *once*, with everything the orchestrator needs. There is no `step()`; Metatron never single-steps a harness. This is the architectural firewall between Metatron's loop and the harness's loop.
 - **Everything past `run` + `capabilities` is optional** and default-`Unsupported`. A valid adapter can be ~30 lines: shell out to a CLI, parse its final diff, fill a `HarnessResult`. Richness is additive.
-- **`descriptor()` feeds decorrelation and reputation.** Knowing *which* harness/model produced a result lets `02`/`08` attribute reputation and lets the council avoid stacking correlated voters (overview §6.3).
+- **`descriptor()` feeds decorrelation and reputation.** Knowing *which* harness/model produced a result lets `02`/`08` attribute reputation and lets the council avoid stacking correlated voters (overview §6.3). The descriptor's fields — `{tool, version, model_family, scaffold, prompt_template_hash}` — are a **correlation prior** owned here; the estimator that consumes them is owned by `02` (RD-6, §9).
 
 ### 3.2 `TaskSpec`, `Context`, `HarnessResult`
 
@@ -149,7 +149,7 @@ struct TaskSpec {
 /// Ambient context the harness may use but does not own.
 struct Context {
     world_view: WorldView,      // read-only projection of relevant world-model slices (01)
-    memory: Option<MemoryRef>,  // optional retrieval handle (cross-session memory; see OQ-7)
+    memory: Option<MemoryRef>,  // optional handle into the versioned, content-addressed memory store (RD-7, §9)
     correlation: TraceContext,  // ties this session into the observability trace tree (07)
     peers: Vec<AgentId>,        // wired collaborators (from the configuration layer wiring)
     tier_hint: Tier,            // current JIT tier of this agent (05); Tier0 here, others in 05
@@ -225,9 +225,9 @@ The split is the heart of the design decision on capability negotiation:
 |-------------------|------------------------------|
 | `structured_tool_log` | reconstruct a coarse step trace from the final diff + report; mark trace `fidelity = Coarse`. |
 | `per_step_diffs` | single cumulative diff node; no intra-session timeline. |
-| `usage_accounting` | cost/token metrics are `Unknown`; cost-control (PID `cost` dim, `03`) falls back to *wall-clock × tier price model* estimates (see OQ-4). |
+| `usage_accounting` | cost/token metrics are `Unknown`; cost-control (PID `cost` dim, `03`) falls back to a *wall-clock × tier-price* estimate, flagged and reconciled later, normalized via the per-harness cost model (RD-4, §9). |
 | `streams_progress` | no live progress; status is inferred from session liveness + final result only. |
-| `cooperative_checkpoint`/`cancel` | reconciliation must treat the session as **non-preemptible**; uses forceful cancel + idempotent retry (§9, OQ-3). |
+| `cooperative_checkpoint`/`cancel` | reconciliation must treat the session as **non-preemptible**: it defaults to the `atomic` session class (wait) or `force-cancellable` (forceful cancel + discard isolated workspace), never cooperative checkpoint (RD-3, §9). |
 
 Telemetry being best-effort is **explicit and load-bearing**, not an oversight: it is what lets Metatron orchestrate *tomorrow's* harnesses, which we cannot specify today.
 
@@ -242,7 +242,7 @@ The adapter is where the impedance mismatch is absorbed. Reference mappings:
 | **Aider** | from its commit/diff output | parsed from its edit-block log | `Medium` | model usage if logged |
 | **Generic CLI wrapper** | `git diff` of workspace before/after | minimal: outcome + check_results only | `Sparse` | `None` |
 
-The **generic CLI wrapper** is the existence proof of the minimum: *any* tool that edits a workspace and exits can be wrapped by diffing the workspace and synthesizing a `StructuredReport` from the exit status and acceptance checks. How to faithfully project *partial* vendor telemetry into the uniform shape — and how much to trust a self-reported report vs. independently re-derive it — is parked in OQ-1.
+The **generic CLI wrapper** is the existence proof of the minimum: *any* tool that edits a workspace and exits can be wrapped by diffing the workspace and synthesizing a `StructuredReport` from the exit status and acceptance checks. Per RD-1 (§9), Metatron **re-derives** safety-critical facts (notably the `diff`) rather than trusting the harness's self-report, marks partial telemetry `Partial` with explicit gaps, and trusts only non-critical self-reported fields; the residual *empirical* fidelity bound is carried forward as OQ-1′ (§10).
 
 ### 3.5 Acceptance checks (determinism-first verification of work)
 
@@ -356,7 +356,7 @@ struct SupervisionPolicy {
 }
 ```
 
-- A **failed session** (`Outcome::Failed`/`TimedOut`) is a *local* event: the supervisor restarts the agent's session per policy (idempotent — see §9 on partial side effects).
+- A **failed session** (`Outcome::Failed`/`TimedOut`) is a *local* event: the supervisor restarts the agent's session per policy. Restart is safe for idempotent work; tools with non-transactional external effects are declared `non-restartable` and **escalate instead of blind-restarting** (RD-5, §9).
 - A **persistently failing agent** that blows its restart budget **escalates**: the failure becomes observable signal (`07`), can drive a Sentinel detection and a reputation hit (`08`), and ultimately surfaces as a control signal that the **council** may respond to by *retiring or rewiring* the agent (a `02` proposal) — closing back into the governance loop. The Execution plane never *decides* to remove an agent from desired state; it surfaces evidence and lets governance decide.
 - **`OneForAll`/`RestForOne`** matter for *wired teams*: if a coordinator agent dies, dependent workers may need coordinated restart, exactly as in actor supervision trees.
 
@@ -455,7 +455,7 @@ This section gathers the normative shapes this spec introduces (beyond the canon
 trait AgentHarness { /* §3.1 */ }
 struct CapabilitySet      { /* §3.3 */ }
 struct MinimumGuarantees  { /* §3.3 */ }
-struct HarnessDescriptor  { tool: String, version: String, model: String, scaffold: String }
+struct HarnessDescriptor  { tool: String, version: String, model_family: String, scaffold: String, prompt_template_hash: Hash }  // correlation prior; RD-6 §9
 
 struct TaskSpec        { /* §3.2 */ }
 struct Context         { /* §3.2 */ }
@@ -536,7 +536,7 @@ The harness is driven as a black box, but it is *confined* by the backend, not b
 
 ### 6.3 Workspace isolation between concurrent Workers
 
-Each session gets a `WorkspaceSpec` with an `isolation` mode. The default for concurrent independent Workers is **per-session isolated working copies** (e.g. a git worktree / copy-on-write clone per session), reconciled back via `HarnessResult::diff`. Shared-workspace modes exist for tightly-wired teams but raise contention and interference questions parked in OQ-2.
+Each session gets a `WorkspaceSpec` with an `isolation` mode. The default for concurrent independent Workers is **per-session isolated working copies** (e.g. a git worktree / copy-on-write clone per session), reconciled back via `HarnessResult::diff` at commit time. Per RD-2 (§9), a **shared transactional workspace** is an opt-in advanced mode for tightly-wired teams, run under optimistic concurrency with mechanically-detected, governance-resolved conflicts.
 
 ---
 
@@ -566,22 +566,41 @@ To keep the seams honest, two test batteries are normative:
 
 ---
 
-## 9. Open questions & ambiguities
+## 9. Resolved decisions
 
-Parked, tracked, and owned here per overview §9. These are genuine — not yet decided.
+Committed design from the v0.1 design review. These were formerly open questions; they are now **normative**. Each keeps its original `OQ-n` label for traceability. Where a residual empirical or future-work question survives a resolution, it is carried forward to §10.
 
-- **OQ-1 — Partial-telemetry fidelity mapping.** How faithfully can a heterogeneous harness's *partial* telemetry be projected into the uniform `HarnessResult` without misrepresenting it? When a harness reports *some* tool calls but not all, do we mark the trace `Partial` and how do downstream consumers (`07`, `05`) reason about gaps? And how much of a harness's self-reported `report` should be trusted vs. independently re-derived (e.g. recompute the diff ourselves rather than believe the harness)? Over-trust corrupts the system of record; over-verification is expensive.
-- **OQ-2 — Workspace/state isolation between concurrent Workers.** Default is per-session isolated working copies (§6.3), but tightly-wired teams sometimes need shared state. How do we handle write-write conflicts, interference, and visibility when two Workers operate on overlapping workspaces? Is the answer always "isolate + merge via diffs at commit," or do we need a transactional shared workspace with optimistic concurrency? How does isolation interact with the content-addressed artifact store?
-- **OQ-3 — Reconciliation vs. non-preemptible sessions.** Many harness sessions cannot be cleanly preempted: a Claude Code run mid-edit has no safe checkpoint. When desired state changes (Retire/Migrate/Rewire) while a session is in flight, do we (a) wait for the session to finish (latency), (b) `cancel(Forceful)` and accept a possibly half-applied workspace (correctness — but the isolated working copy is discarded, so side effects are contained *if* the harness only touched its workspace), or (c) require `cooperative_checkpoint` for preemptible classes of work and treat the rest as atomic? How does drain interact with the level-triggered loop when a generation changes mid-session?
-- **OQ-4 — Cost/quota accounting per harness.** Harnesses that lack `usage_accounting` give no token/cost data, yet the PID `cost` dimension (`03`) and per-role budgets need numbers. The fallback (wall-clock × tier price model) is crude. How do we attribute spend across heterogeneous billing models (per-token, per-seat, per-request), enforce a `Budget` *during* a non-cooperative session (we can only hard-cancel, not throttle), and reconcile estimated vs. actual spend after the fact? Quota exhaustion mid-session is a special case of OQ-3.
-- **OQ-5 — Partial side effects & restart idempotency.** Supervision restarts assume sessions are idempotent, but a harness may have external side effects (pushed a branch, called an API, sent a message) before failing. Isolated workspaces contain *filesystem* effects but not *external* ones. How do we make restart safe in the presence of non-transactional external effects — effect logs + compensation, an outbox, or declaring such tools "non-restartable"?
-- **OQ-6 — `descriptor()` granularity for decorrelation.** Reputation and decorrelation (`02`/`08`) need to know "how independent are these two results." Is `{tool, version, model, scaffold}` enough to estimate correlation, or do two Workers on the *same* model via *different* harnesses still fail correlatedly? What's the right similarity metric, and who owns it — here or `08`?
-- **OQ-7 — Cross-session memory ownership.** `Context::memory` hints at retrieval/memory across sessions, but memory is a correlation *and* a state-of-record hazard (a harness's private memory is outside the Merkle history). Where does legitimate cross-session agent memory live, how is it versioned, and how does it avoid silently re-correlating "independent" agents that share a memory store?
-- **OQ-8 — Backend migration of live agents.** `Migrate` is clean for an idle agent but undefined for one mid-session (subsumes OQ-3). Is live migration across backends (actors→Pods) ever supported, or only at session boundaries?
+- **RD-1 — Partial-telemetry fidelity (was OQ-1).** A harness that reports only part of its activity yields a trace **explicitly marked `Partial` with its coverage gaps enumerated** — a missing measurement is **never silently rendered as zero**. Safety-critical facts are **independently re-derived** by Metatron, never trusted from the harness's self-report: in particular the workspace `diff` is **recomputed by Metatron** (workspace before/after) rather than believed, and acceptance is `check`ed (§3.5), not reported. Non-critical self-reported fields (rationale, narrative step labels, advisory progress) are trusted as-is. This is determinism-first (overview §6.2) at the telemetry boundary: **verify what matters, accept the rest.** *(The empirical fidelity bound — how faithfully partial telemetry can be projected at all — remains open as OQ-1′ in §10.)*
+
+- **RD-2 — Workspace isolation between concurrent Workers (was OQ-2).** **Default: per-session isolated working copies** (git worktree / copy-on-write clone), **merged back via `HarnessResult::diff` at commit time** (§6.3). A **shared transactional workspace is an opt-in advanced mode** for tightly-wired teams, run under **optimistic concurrency**: write-write conflicts are **mechanically detected** and **resolved by governance** (a `02` proposal) rather than silently last-writer-wins — consistent with the conflict model in `01`.
+
+- **RD-3 — Preemption & session classes (was OQ-3).** Every session declares one of three **session classes**:
+  - **cooperative-checkpoint** — preemptible; requires `cooperative_checkpoint`; reconciliation may checkpoint and resume.
+  - **atomic** — run-to-completion; reconciliation **waits** for it to finish before applying a conflicting lifecycle action.
+  - **force-cancellable** — may be hard-cancelled at any time; its **isolated workspace is discarded** on cancel (filesystem effects contained; external effects per RD-5).
+
+  **The default class for harness sessions is `atomic`.** When desired state changes mid-session, reconciliation **waits or force-cancels by class** — it never blind-kills an atomic session. A **generation change mid-session drains by class** rather than by one global policy.
+
+- **RD-4 — Cost & quota accounting (was OQ-4).** Heterogeneous billing models (per-token, per-seat, per-request) are **normalized to a common cost unit** via a **per-harness cost model**. When `usage_accounting` is absent, cost falls back to **wall-clock × tier-price**, emitted as a **flagged estimate** and **reconciled against actuals** afterward. Budgets are **enforced by hard-cancel at thresholds** (non-cooperative sessions cannot be throttled, only stopped). **Quota exhaustion mid-session uses the RD-3 force-cancel path.**
+
+- **RD-5 — Side effects & restart idempotency (was OQ-5).** External side effects use an **outbox + effect-log** pattern. A tool with **non-transactional external effects** (pushed a branch, called an API, sent a message) is **declared `non-restartable`**; on failure, supervision **escalates rather than blind-restarting** it, applying **compensation where defined**. Isolated workspaces (RD-2) contain *filesystem* effects on cancel/restart but **not external** ones — those are governed by the effect log.
+
+- **RD-6 — `descriptor()` granularity (was OQ-6).** The harness descriptor is `{tool, version, model_family, scaffold, prompt_template_hash}`, used as a **correlation prior** — with `model_family` weighted most heavily — that is then **refined by observed agreement**. The **descriptor is owned here**; the **correlation estimator that consumes it is owned by `02`.**
+
+- **RD-7 — Cross-session memory (was OQ-7).** Legitimate cross-session memory lives in a **versioned, content-addressed memory store referenced from the progress layer** — i.e. inside the Merkle history (`01`) — and is **declared as a correlation source to `02`.** Harness-private memory outside the Merkle history is **discouraged and treated as untrusted**: it cannot enter the system of record and is assumed to silently correlate any agents that share it.
 
 ---
 
-## 10. Relationships to other specs
+## 10. Open questions & ambiguities
+
+Parked, tracked, and owned here per overview §9. Most of this spec's original open questions were resolved in §9; only the genuinely-open items remain.
+
+- **OQ-1′ — Partial-telemetry fidelity bound (residual of OQ-1).** RD-1 fixes the *policy* (mark `Partial`, enumerate gaps, re-derive safety-critical facts, trust the rest). What remains genuinely open is the **empirical limit**: *how faithfully* can a given harness's partial telemetry be projected into the uniform `HarnessResult` before the projection itself **misrepresents** what happened? This is a per-harness empirical bound — some telemetry may be so sparse that even a gap-annotated `Partial` trace misleads downstream consumers (`07`, `05`) — and it cannot be settled by design alone; it needs measurement against real adapters.
+- **OQ-8 — Live cross-backend migration of a mid-session agent.** `Migrate` is clean for an idle agent, and per RD-3 a mid-session agent is handled by waiting or force-cancelling by class. **v1 supports backend migration (actors↔Pods) only at session boundaries.** True *live* migration of an in-flight session across backends — relocating a running vendor loop **without restarting it** — is **out of scope for v1 and deferred to future work**; whether it is ever worthwhile remains open.
+
+---
+
+## 11. Relationships to other specs
 
 - **`00-overview.md`** — Canonical anchor. `AgentHarness`, `ExecutionBackend`, `Tier`, `WorldModel`, `AgentId`, `Hash` are imported from §7, not redefined. Realizes the "abstract over execution" commitment (§1) and the Execution plane (§2). This spec is the "plant"/actuator in the closed loop (§5).
 - **`01-state-model.md`** — The **configuration layer** of the `WorldModel` is the **desired** input to reconciliation; the **progress layer** receives the diffs/artifacts that sessions produce. `ActualState` is the runtime projection that desired is reconciled against. Scope grants and wiring are configuration-layer state.

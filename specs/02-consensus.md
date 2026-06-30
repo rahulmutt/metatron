@@ -244,6 +244,8 @@ enum VerificationVerdict {
 
 **Why verify first and not in parallel with voting?** Two reasons. (1) **Cost:** a `Refuted` proposal must never burn council tokens. (2) **Anchoring:** jurors who have seen a clean `VerificationReport` reason from facts, not vibes — the report *constrains the residue*, raising per-juror `p` (Lever 1 feeding Lever-1-on-the-residue). The verification `digest` is embedded in the `Decision` and re-runnable on replay, so the whole determinism-first claim is auditable.
 
+**The verification suite is itself versioned state under consensus** (committed design, §11.7). The §4.2 boundary between "machine-checkable" and "subjective residue" is *not* fixed: when the Compiler ([`05`](./05-agent-jit.md)) compiles a formerly-subjective judgment into a deterministic check, **promoting that check into the suite is a governed proposal** decided by this same protocol. The self-referential loop — consensus governing the checks that preempt consensus — is explicit and governed.
+
 ---
 
 ## 5. Lever 2 — Decorrelate the agents
@@ -275,7 +277,7 @@ enum RoleLens {
 }
 ```
 
-The intuition: a homogeneous council (same model, same prompt, same seed) is *one juror wearing a costume n times* — its votes are near-perfectly correlated and CJT gives almost nothing. A heterogeneous council approximates *n* independent draws. **Composing a maximally-diverse council is a genuine open problem** (§11) — diversity is hard to measure ex ante and trades off against per-juror competence (an exotic model may be more independent but less competent, lowering `p`). We park the optimization; the *requirement* (compose for diversity) is normative.
+The intuition: a homogeneous council (same model, same prompt, same seed) is *one juror wearing a costume n times* — its votes are near-perfectly correlated and CJT gives almost nothing. A heterogeneous council approximates *n* independent draws. **Composing a maximally-diverse council is committed design (§11.4):** the protocol maintains a running agreement-beyond-chance correlation matrix and composes councils to *minimize expected inter-juror correlation subject to a per-agent competence floor*, with the correlation prior keyed off a juror descriptor (`{tool, version, model_family, scaffold, prompt_template_hash}`, `model_family` weighted most; descriptor owned by [`04`](./04-runtime-and-harness.md), correlation estimation owned here). The diversity↔competence tradeoff (an exotic model may be more independent but less competent, lowering `p`) is bounded by the competence floor; live recomposition is a *slow control surface* in [`03`](./03-control-loop.md).
 
 ### 5.2 Layer 3: The blind vote (decorrelate by procedure)
 
@@ -356,7 +358,7 @@ A vote can only be rewarded or penalized against *something*. Metatron uses a **
 | **G1 — Execution outcome** | After commit, the Execution plane reconciles. Did the change actually achieve its diff's intent without trap storms / rollback / invariant breach observed downstream? (via [`04`](./04-runtime-and-harness.md), [`07`](./07-observability.md)) | minutes–hours | medium |
 | **G2 — User feedback** | The user's eventual acceptance/rejection/correction via the mailbox ([`06`](./06-interaction-and-mailbox.md)). The ultimate setpoint. | hours–days, sometimes never | highest, sparsest |
 
-The **lag** is fundamental and unsolved in general: at vote time we do *not* know G2, and often not G1. Reputation updates are therefore **retroactive** — a `Decision` is recorded with its votes, and as ground-truth tiers arrive they are *joined back* to those votes to update reputations. The exact attribution (which signal counts how much, how to handle never-arriving G2, how to discount stale credit) is a parked open question (§11).
+The **lag** is fundamental: at vote time we do *not* know G2, and often not G1. Reputation updates are therefore **retroactive** — a `Decision` is recorded with its votes, and as ground-truth tiers arrive they are *joined back* to those votes to update reputations. The attribution policy is committed design (§11.1): a vote is **scored on whatever tier has arrived under a staleness discount**; a never-arriving G2 is scored on G0/G1 alone at lower weight; and **credit is assigned back to the originating proposal along the causal trace-id chain ([`07`](./07-observability.md)) with eligibility-trace decay** over intervening commits. (Only the empirical discount/decay constants remain open — §12b.)
 
 ### 6.3 Update dynamics
 
@@ -391,7 +393,7 @@ fn decay(rep: &mut ReputationState, now: LogicalTime) {
 }
 ```
 
-Properties we require of *whatever concrete update rule §11 settles on*:
+The concrete update rule is committed design (§11.3): a **proper scoring rule (log/Brier)** against ground truth, a **Bayesian beta-style update around a class prior** with shrinkage on low samples, **bounded slashing** (no single event zeroes an agent), and a **tunable decay half-life** toward the class prior. Reputation *acquisition* for a fresh agent is class-prior-with-decay (locked in [`08`](./08-trust-and-security.md)). The rule satisfies, by construction, the following properties (its empirical constants remain open — §12b):
 
 - **Bounded:** `skill, calibration, weight ∈ [0,1]`; no single decision can swing a reputation arbitrarily (anti-whipsaw).
 - **Shrinkage on low samples:** new or rarely-tested members sit near a neutral prior; influence is *earned*.
@@ -466,19 +468,23 @@ struct ConsensusConfig {
     pass_threshold_constitutional: f32,  // default 3/4
     quorum_weight: f32,                  // min participating weight for validity (§10)
     split_margin: f32,                   // ambiguity band half-width (§7.1)
-    max_rounds: u32,                     // default e.g. 2; HARD cap on deliberation rounds
+    max_rounds: u32,                     // default 3 (§11.8); HARD cap on deliberation rounds
     round_deadline: Duration,            // per-round wall-clock; non-responders excluded (§10)
     convergence_eps: f32,                // if dispersion stops shrinking by > eps, stop early
 }
 ```
 
-Deliberation halts on the **first** of: (a) a round produces a *decisive* re-vote → commit/reject; (b) `max_rounds` reached; (c) **early stop** — dispersion failed to shrink by `convergence_eps` between rounds (talking is no longer helping; more rounds will only correlate). Cases (b) and (c) with a still-split result trigger **escalation**.
+All `ConsensusConfig` fields are **tunable**; their committed defaults (council `n = 5–7` odd, `max_rounds = 3`, plus `split_margin`, `round_deadline`, `quorum_weight`, `convergence_eps`) are tabulated in §11.8, where the small-`n` coarseness of the ⅔/¾ thresholds is noted. Empirical values remain workload-dependent tuning (§12b).
+
+Deliberation halts on the **first** of: (a) a round produces a *decisive* re-vote → commit/reject; (b) `max_rounds` reached; (c) **early stop** — dispersion failed to shrink by `convergence_eps` between rounds (talking is no longer helping; more rounds will only correlate). Cases (b) and (c) with a still-split result trigger **escalation** (§7.4).
 
 ### 7.4 Escalation
 
 > A vote that stays split and unresolved after bounded deliberation is **escalated to the user**.
 
-The protocol **does not** break ties by fiat, coin-flip, or chair's-casting-vote. A persistent split is *information*: it means the question is genuinely subjective or under-specified — exactly the case where, per §2.2 corollary 3, aggregation may be worse-than-random and the council should **not** pretend to decide. The proposal, its `VerificationReport`, the vote history, the de-identified critiques, and the residual dispersion are packaged and handed to the **user via the mailbox** ([`06`](./06-interaction-and-mailbox.md)). The affected work **blocks** until the user resolves it (anchor §5). The user's resolution is high-authority G2 ground truth and feeds reputation (§6.2).
+The protocol **does not** break ties by fiat, coin-flip, or chair's-casting-vote. A persistent split is *information*: it means the question is genuinely subjective or under-specified — exactly the case where, per §2.2 corollary 3, aggregation may be worse-than-random and the council should **not** pretend to decide.
+
+The escalation response is **tiered by blast radius** (committed design, §11.6): **high-stakes** proposals escalate to the **user via the mailbox**, while **low-stakes** ones get a **controller-level** response (auto-simplify, Guardian re-decomposition, or widen the council) without burdening the user — see [`03`](./03-control-loop.md). For an escalated high-stakes split, the proposal, its `VerificationReport`, the vote history, the de-identified critiques, and the residual dispersion are packaged and handed to the **user via the mailbox** ([`06`](./06-interaction-and-mailbox.md)). The affected work **blocks** until the user resolves it (anchor §5). The user's resolution is high-authority G2 ground truth and feeds reputation (§6.2). (Whether *persistent structural* splits need a still-higher controller response beyond this remains open — §12c.)
 
 ```rust
 enum Outcome {
@@ -514,8 +520,10 @@ fn aggregate(votes: &[Vote], reps: &ReputationMap, vr: &VerificationReport) -> W
     // AND the voter's *calibrated* confidence (a well-calibrated 0.9 moves the posterior more
     // than a poorly-calibrated 0.9). Approve pushes the posterior up, Reject down, Abstain ~ no-op
     // (but counts against participation, §10).
-    // The exact functional form (naive-Bayes log-odds pool vs. a learned opinion pool) is parked (§11);
-    // REQUIRED properties below are normative regardless of form.
+    // The form is COMMITTED (§11.2): a reputation-weighted log-odds (naive-Bayes) pool
+    // DISCOUNTED by an estimated correlation factor (from descriptor similarity; 04-OQ6) so
+    // correlated votes don't over-sharpen the posterior, behind a swappable `Aggregator` trait.
+    // The exact correlation-aware functional form remains open (§12a); properties below are normative.
 }
 ```
 
@@ -533,8 +541,8 @@ Required properties of the aggregator (form-independent):
 fn dispersion(tally: &WeightedTally) -> f32 {
     // A measure of how DIVIDED the reputation-weighted vote mass was, independent of WHERE the
     // posterior landed. Low when the council was near-unanimous (in either direction); high when
-    // weight was split. Candidate measures: weighted vote-entropy, or weighted variance of the
-    // signed (verdict*confidence) scores. Choice parked (§11).
+    // weight was split. COMMITTED (§11.5): reputation-weighted NORMALIZED SHANNON ENTROPY of the
+    // weighted vote mass, PLUS a bimodality flag; smooth and control-friendly, co-tuned with 03.
 }
 ```
 
@@ -627,32 +635,82 @@ LLM-backed members are slow and sometimes unreachable. The protocol must make pr
 
 ---
 
-## 11. Open questions & ambiguities
+## 11. Resolved decisions
 
-Parked, not solved. These are the genuine research gaps surfaced by this spec.
+A design review **resolved** most of this spec's earlier open questions. The decisions below are **normative committed design** — the protocol in §4–§10 is built to them, and the body sections carry forward-refs to here. What remains genuinely open (an exact formula, the empirical constants, one liveness pathology) is in §12.
 
-| # | Question | Why it's hard / parked |
-|---|----------|------------------------|
-| **Q1 — Ground-truth determination & lag** | How exactly is the `correct_verdict` for a past vote established, and how do we attribute credit across G0/G1/G2 when the authoritative signal (user, G2) is **lagged or never arrives**? How much should stale credit be discounted? | Causal attribution of an outcome back to a single proposal is genuinely ambiguous (many commits intervene). Never-arriving G2 means many votes are scored only on the weaker G0/G1. Touches [`06`](./06-interaction-and-mailbox.md), [`07`](./07-observability.md). |
-| **Q2 — Maximally-diverse council composition** | How do we *measure* inter-juror error correlation ex ante and *optimize* a council for diversity, given the diversity↔competence tradeoff (more exotic ⇒ more independent but often less competent, lowering `p`)? | Diversity is hard to quantify before you've seen the errors; CJT wants both high `p` and low correlation, which trade off. A live recomposition policy is a control problem ([`03`](./03-control-loop.md)). |
-| **Q3 — Concrete posterior aggregation formula** | Naive-Bayes log-odds pool vs. learned/​supra-Bayesian opinion pool vs. something accounting for residual vote correlation? Exact functional form of `aggregate` (§8.1). | Independence is only *approximate* (Lever 2 reduces but doesn't zero correlation); a naive pool double-counts correlated evidence and over-sharpens the posterior. The "right" pool depends on Q2's correlation estimates. |
-| **Q4 — Reputation update rule** | The concrete `update_reputation` / `decay` / `voting_weight` functions (§6): learning rate, prior, shrinkage schedule, slashing magnitudes, decay half-life. | Must satisfy all the §6.3 properties simultaneously (proper scoring, anti-whipsaw, no permanence, replayable) — a multi-objective tuning problem with safety implications (a too-aggressive slash can silence a council; too-soft lets drifters persist). |
-| **Q5 — Deadlock / liveness under persistent splits** | If a class of proposals *reliably* escalates (the council is structurally split and the user keeps punting), the loop can thrash. What's the policy — auto-simplify the proposal, force a Guardian re-decomposition, raise `max_rounds`, or change council composition? | Escalation (§7.4) is the safe default but isn't a *resolution*; persistent escalation is a liveness pathology. Likely needs a PID-controller-level response ([`03`](./03-control-loop.md)), not a consensus-level one. |
-| **Q6 — Dispersion measure** | Weighted entropy vs. weighted variance vs. a bimodality-sensitive measure for `dispersion` (§8.2)? It feeds the PID controller, so its *scale and sensitivity* matter for control stability. | The controller in [`03`](./03-control-loop.md) is tuned against this signal; the two specs must co-design it. A measure that saturates or is noisy will destabilize the loop. |
-| **Q7 — Default constants** | `split_margin`, `max_rounds`, `round_deadline`, `quorum_weight`, `convergence_eps`, council size *n* (§7.3). | All "defaults, tunable" — their right values are empirical and workload-dependent; some interact (small *n* makes ⅔ coarse-grained). |
-| **Q8 — Verification/voting boundary drift** | The line between "machine-checkable" (§4.2) and "subjective residue" moves as the Compiler/JIT subsystem ([`05`](./05-agent-jit.md)) learns to *compile* formerly-subjective judgments into deterministic checks. How is that boundary versioned and promoted? | This is the determinism-first principle meeting the JIT principle; it implies the verification suite is itself evolving state under consensus — a self-referential loop. |
+### 11.1 Ground truth is a three-tier, staleness-discounted, trace-chained signal
+
+Votes are scored against a **three-tier** ground-truth signal (§6.2):
+
+- **G0** — the *immediate verification outcome*.
+- **G1** — the *downstream consequence within a bounded horizon* (via [`04`](./04-runtime-and-harness.md), [`07`](./07-observability.md)).
+- **G2** — *user feedback*; **optional and lagged**, sometimes never arriving (via [`06`](./06-interaction-and-mailbox.md)).
+
+A vote is scored on **whatever tier has arrived**, applying a **staleness discount** as credit ages. A **never-arriving G2** does not block scoring — the vote is scored on **G0/G1 only, at lower weight**. **Credit assignment** back to the originating proposal follows the **causal trace-id chain** ([`07`](./07-observability.md)) with **eligibility-trace decay** over the commits that intervene between the proposal and the resolved outcome.
+
+### 11.2 Aggregation is a correlation-discounted, reputation-weighted log-odds pool
+
+The posterior (§8.1) is a **reputation-weighted log-odds (naive-Bayes) pool**, **discounted by an estimated correlation factor** so that correlated votes do not over-sharpen the posterior. The correlation factor derives from juror **descriptor similarity** (descriptor owned by [`04`](./04-runtime-and-harness.md), OQ6; see §11.4). The aggregator is **swappable behind an `Aggregator` trait**.
+
+### 11.3 Reputation update is proper-scoring + Bayesian beta + bounded slashing + decay
+
+The reputation update (§6.3, §6.4) is fixed as: a **proper scoring rule (log / Brier)** of `(verdict, confidence)` against ground truth; a **Bayesian beta-style update around a class prior** with **shrinkage** toward that prior on low samples; **bounded slashing** (no single event can zero an agent); and a **tunable decay half-life** regressing reputation toward the class prior without fresh evidence. Reputation **acquisition** for a newly-instantiated agent is **class-prior-with-decay** (locked in [`08`](./08-trust-and-security.md)).
+
+### 11.4 Diversity is correlation-matrix-minimizing, competence-floored, slow control
+
+The protocol maintains a running **agreement-beyond-chance correlation matrix** over jurors and composes councils to **minimize expected inter-juror correlation subject to a per-agent competence floor** (§5.1). Composition is a **slow control surface** owned by [`03`](./03-control-loop.md), not a per-decision choice. The **correlation prior** keys off the descriptor `{tool, version, model_family, scaffold, prompt_template_hash}`, with **`model_family` weighted most**. The descriptor is **owned by [`04`](./04-runtime-and-harness.md)** (OQ6); correlation **estimation is owned here**.
+
+### 11.5 Dispersion is reputation-weighted normalized Shannon entropy + a bimodality flag
+
+`dispersion` (§8.2) is **reputation-weighted normalized Shannon entropy** of the weighted vote mass, plus a **bimodality flag**. It is chosen to be smooth and control-friendly and is **co-tuned with [`03`](./03-control-loop.md)** to avoid saturation.
+
+### 11.6 Deadlock response is tiered by blast radius
+
+After `max_rounds` with a persistent split (§7.4): **high-stakes** proposals **escalate to the user** via the mailbox ([`06`](./06-interaction-and-mailbox.md)); **low-stakes** proposals get a **controller-level** response — auto-simplify, Guardian re-decomposition, or widen the council ([`03`](./03-control-loop.md)). Liveness is **tiered-by-blast-radius** (locked).
+
+### 11.7 The verification suite is itself versioned state under consensus
+
+The **verification suite (§4.2) is versioned state under consensus.** When the Compiler ([`05`](./05-agent-jit.md)) compiles a formerly-subjective judgment into a deterministic check, **promoting** that check into the suite is a **governed proposal** decided by this same protocol. The self-referential loop — consensus governing the checks that preempt consensus — is **explicit and governed**.
+
+### 11.8 Constants ship as a tunable defaults table
+
+The protocol ships the following **defaults table**; every entry is **tunable** (§7.3):
+
+| Constant | Default |
+|----------|---------|
+| council size `n` | **5–7, odd** |
+| `max_rounds` | **3** |
+| `split_margin` | tunable |
+| `round_deadline` | tunable |
+| `quorum_weight` | tunable |
+| `convergence_eps` | tunable |
+
+The **small-`n` coarseness** is noted: at `n = 5–7`, the ⅔/¾ thresholds are coarse-grained. Empirical values remain workload-dependent tuning (§12b).
 
 ---
 
-## 12. Relationships to other specs
+## 12. Open questions & ambiguities
+
+Parked, not solved. After the §11 review, these are the *only* genuine research gaps that remain.
+
+| # | Question | Why it's hard / parked |
+|---|----------|------------------------|
+| **(a) — Exact correlation-aware aggregation formula** | Given the committed correlation-discounted log-odds pool (§11.2), what is the *precise* functional form of the correlation discount in `aggregate` (§8.1)? | Naive-Bayes is only *approximate*: Lever 2 reduces but never zeroes inter-juror correlation, so independence is imperfect and a naive pool still over-sharpens. The right discount depends on the §11.4 correlation estimates and is a research problem. |
+| **(b) — Empirical reputation/consensus constants** | The concrete numeric values behind §11.3 and §11.8: learning rate, prior strength, shrinkage and decay half-lives, slashing magnitudes, `split_margin`, `round_deadline`, `quorum_weight`, `convergence_eps`, council size. | All are "defaults, tunable"; their right values are **empirical and workload-dependent**, and some interact (small *n* makes ⅔ coarse-grained; too-aggressive slashing can silence a council, too-soft lets drifters persist). |
+| **(c) — Persistent structural splits beyond escalation** | The deadlock *response* is settled (tiered-by-blast-radius, §11.6), but if a class of proposals *reliably* escalates — the council is **structurally** split and the user keeps punting — does this need a **higher-level [`03`](./03-control-loop.md) controller response** beyond escalation? | Escalation is the safe default but is not a *resolution*; persistent structural escalation is a **liveness pathology** that likely needs a PID-controller-level response, not a consensus-level one — a research question co-owned with [`03`](./03-control-loop.md). |
+
+---
+
+## 13. Relationships to other specs
 
 | Spec | Relationship |
 |------|-------------|
 | [`00-overview.md`](./00-overview.md) | **Anchor.** Source of all canonical types (`Proposal`, `Vote`, `Decision`, `Commit`, `WorldModel`, `ErrorVector`, `Reputation`, `AgentId`, `Signature`), the five planes, the agent taxonomy (proposer ≠ voter), the seven design principles, and the ⅔/¾ thresholds. This spec elaborates principles §6.1–6.4 into the layered protocol. |
 | [`01-state-model.md`](./01-state-model.md) | **Reads & writes.** Consumes the `WorldModel` head and the `TypedDiff`/`Layer` schemas; the only writer of `Commit`s to the Merkle DAG. Verification (§4.2) checks invariants defined there; the constitutional classifier (§9.2) keys off the kernel-membership region of the `Configuration` layer. (Spec not yet authored; this doc relies on the anchor's `Commit`/`WorldModel` shapes meanwhile.) |
-| [`03-control-loop.md`](./03-control-loop.md) | **Downstream consumer + upstream source.** Emits `Decision.dispersion` as `ErrorVector.divergence` (§8.3). Receives control-action-derived proposals (`Proposal.derived_from`). Q5/Q6 are co-designed with the controller. |
-| [`04-runtime-and-harness.md`](./04-runtime-and-harness.md) | **Ground-truth source (G1).** After a `Commit`, the `ExecutionBackend` reconciles toward the new desired state; execution outcomes feed reputation (§6.2 G1). |
-| [`05-agent-jit.md`](./05-agent-jit.md) | **Boundary co-evolution.** Compilers may promote formerly-subjective judgments into deterministic verification checks (Q8), moving the §4.2 line over time. |
+| [`03-control-loop.md`](./03-control-loop.md) | **Downstream consumer + upstream source.** Emits `Decision.dispersion` as `ErrorVector.divergence` (§8.3). Receives control-action-derived proposals (`Proposal.derived_from`). Owns council recomposition as a slow control surface (§11.4) and the low-stakes deadlock response (§11.6); co-designs the dispersion measure (§11.5); the persistent-structural-split pathology is the open item §12c. |
+| [`04-runtime-and-harness.md`](./04-runtime-and-harness.md) | **Ground-truth source (G1) + descriptor owner.** After a `Commit`, the `ExecutionBackend` reconciles toward the new desired state; execution outcomes feed reputation (§6.2 G1). Owns the juror descriptor `{tool, version, model_family, scaffold, prompt_template_hash}` (OQ6) that this spec's correlation estimation (§11.4) keys off. |
+| [`05-agent-jit.md`](./05-agent-jit.md) | **Boundary co-evolution.** Compilers may promote formerly-subjective judgments into deterministic verification checks; such promotion is itself a governed proposal under this protocol (§11.7), moving the §4.2 line over time. |
 | [`06-interaction-and-mailbox.md`](./06-interaction-and-mailbox.md) | **Author + escalation sink + ground-truth source (G2).** Guardians author proposals (§4.1); persistent splits and quorum failures escalate to the user via the mailbox (§7.4, §10.2); user feedback is the highest-authority ground truth (§6.2 G2). |
 | [`07-observability.md`](./07-observability.md) | **Telemetry.** Vote latencies, dispersion, posterior, reputation trajectories, quorum stalls, and equivocation events are emitted to the Observability plane; Sentinels feed off-protocol slashes (§6.3). |
 | [`08-trust-and-security.md`](./08-trust-and-security.md) | **Identity & threat model.** Owns the signing scheme, `AgentId`/key custody, equivocation forensics & eviction (§10.3), and the adversarial-minority threat model that §2.4 defers to. This spec *references* it; it does not duplicate it. |

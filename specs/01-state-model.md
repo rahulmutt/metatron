@@ -78,7 +78,7 @@ Its nodes:
 
 - **`GoalNode`** — the user's normalized goal (from a Guardian, `06`) and its decomposition into **sub-goals**. A sub-goal carries a `status` (`Open | Assigned | Blocked | Resolved | Abandoned`).
 - **`TaskNode`** — a unit of work in the **task graph**, with dependency edges (`TaskEdge`) to other tasks, a `status`, and a back-reference to the sub-goal it serves and (optionally) the assigned agent.
-- **`ArtifactRef`** — a content-addressed pointer to a produced artifact (a blob `Hash` plus metadata: kind, producer, the task that produced it). Large artifact *bytes* may live out-of-band (see §5.3); the world-model holds the `Hash` and provenance.
+- **`ArtifactRef`** — a content-addressed pointer to a produced artifact (a blob `Hash` plus metadata: kind, producer, the task that produced it). Large artifact *bytes* may live out-of-band (see §5.6); the world-model holds the `Hash` and provenance.
 - **`OpenQuestion`** — an ambiguity surfaced to the user via the mailbox (`06`). Carries `status` (`Pending | Answered | Withdrawn`) and, once answered, a reference to the answering user instruction. The anchor's "affected work blocks until answered" (§5) is represented here: a `TaskNode` may declare a `blocked_on: OpenQuestion` edge.
 
 #### Why two layers, one history
@@ -132,7 +132,7 @@ Every node — `Commit`, `WorldModel`, `AgentNode`, `TaskNode`, `ArtifactRef`, a
 - **Causality, not chronology, is what we must preserve.** What history must encode is *"this state was built on that state"* — a happened-before relation — not *"this happened at 14:03:07.221 UTC"*. The `parent` pointer already encodes causality for the commit spine; `LogicalTime` makes it a totalizable scalar.
 - **Determinism of replay.** Replaying the DAG (§3.4) must yield a single canonical order regardless of when or where replay happens. A logical clock derived from the structure does that; wall-clocks do not.
 
-So Metatron uses a **logical clock** as canonical and treats wall-clock as advisory metadata only. The minimal model (§4.7): a **Lamport-style counter** monotonic along the commit chain — `head.timestamp = parent.timestamp + 1` — giving every accepted commit a unique, gap-free, totally-ordered logical index. Because the head is serialized (§2.3), there is a single writer of the next index, so the simple scalar counter suffices for the *spine*; vector/“per-agent” logical clocks (§4.7) are layered on for reasoning about *concurrent candidate proposals* before one wins. Wall-clock is retained as an **advisory** `wall_hint` inside the `decision` record (for human-facing displays and `07`), explicitly **not** load-bearing for ordering or verification.
+So Metatron uses a **logical clock** as canonical and treats wall-clock as advisory metadata only. The minimal model (§4.7): a **Lamport-style counter** monotonic along the commit chain — `head.timestamp = parent.timestamp + 1` — giving every accepted commit a unique, gap-free, totally-ordered logical index. Because the head is serialized (§2.3), there is a single writer of the next index, so the simple scalar counter is **canonical and sufficient** for the *spine*; the per-author vector clock is dropped, and a Hybrid Logical Clock is carried for **display-only** human timelines (§4.7, §5.8). Wall-clock is retained as an **advisory** `wall_hint` inside the `decision` record (for human-facing displays and `07`), explicitly **not** load-bearing for ordering or verification.
 
 ### 2.6 Verifiability & replayability
 
@@ -186,7 +186,7 @@ struct ConfigLayer {
     agents:  MerkleMap<AgentId, Hash>,   // AgentId -> AgentNode hash
     wiring:  MerkleSet<Hash>,            // set of WiringEdge hashes
     kernel:  Hash,                       // KernelSet node (constitutional)
-    schema_version: u16,                 // for forward-compat migration (see Open Q)
+    schema_version: u16,                 // codec version, retained for replay (see §5.5)
 }
 
 struct AgentNode {
@@ -254,7 +254,7 @@ struct TaskNode {
 
 struct ArtifactRef {
     id:        ArtifactId,
-    blob:      Hash,                      // content address of the bytes (may be out-of-band, §5.3)
+    blob:      Hash,                      // content address of the bytes (may be out-of-band, §5.6)
     kind:      ArtifactKind,
     producer:  AgentId,
     by_task:   TaskId,
@@ -300,9 +300,9 @@ A naive blockchain keeps every transaction forever. Metatron does not have to, b
 
 - **Snapshot.** A `SnapshotCommit` is a special commit whose `state_root` is a *fully materialized* `WorldModel` (all reachable nodes present, no reliance on ancestor-only nodes) and which is signed by a Genesis quorum *attesting that replay from the previous snapshot reproduces this state_root*. A snapshot is a new trust anchor: readers may verify from the latest snapshot forward instead of from genesis.
 - **Compaction.** Between snapshots, the *detailed* history (individual diffs, decision records, superseded node versions) can be **summarized**: e.g. fifty progress-layer churns that net to "sub-goal 7 resolved, 3 artifacts produced" can be archived behind the snapshot. The snapshot preserves the *state*; compaction trades away *intermediate replay granularity* for space.
-- **Pruning.** Once a snapshot is established and a retention policy elapses, nodes that are (a) unreachable from any retained head/snapshot and (b) older than the retention horizon may be **garbage-collected** (§ Open Questions for the policy specifics and the unreachable-node GC hazard).
+- **Pruning.** Once a snapshot is established and a retention policy elapses, nodes that are (a) unreachable from any retained head/snapshot and (b) older than the retention horizon may be **garbage-collected**. Pruning is a governed, consensus-proposed operation with *differential per-layer retention* (configuration is permanent, progress is prunable — §5.1); unreachable-node reclamation is epoch-based mark-and-sweep from retained anchors (§5.2).
 
-The key invariant: **pruning never removes a node reachable from a retained trust anchor**, and **every retained head remains fully verifiable from the nearest snapshot**. What you lose by pruning is the ability to replay *below* the snapshot — a deliberate, governed trade. Whether snapshots are themselves immutable forever or also age out is an open question (§5-OQ).
+The key invariant: **pruning never removes a node reachable from a retained trust anchor**, and **every retained head remains fully verifiable from the nearest snapshot**. What you lose by pruning is the ability to replay *below* the snapshot — a deliberate, governed trade. Snapshots are **permanent signed trust anchors** and do not age out (§5.1).
 
 ### 3.6 Querying the store
 
@@ -336,7 +336,7 @@ trait ContentAddressed {
 
 - A fixed, deterministic binary codec (e.g. DAG-CBOR-style) with **sorted map keys**, no insignificant whitespace, fixed integer widths, and **no floats in addressed structures** (reputation/posteriors are stored in the `decision` record, not in the addressed world-model spine; if a float must be addressed it is encoded as a fixed-precision rational/decimal).
 - Child references are encoded **as their `Hash`**, never inlined, so a node's bytes are bounded and structural sharing is automatic.
-- The codec version is pinned per node via `schema_version` (forward-compat migration is an Open Question, §5-OQ).
+- The codec version is pinned per node via `schema_version`; older codecs are retained for bit-exact replay, migrations are governed diffs, and a snapshot may re-canonicalize to the current codec as a signed re-anchoring (§5.5).
 
 ### 4.2 The TypedDiff algebra
 
@@ -404,7 +404,7 @@ enum Precondition {
 }
 ```
 
-If a precondition fails at apply-time, the diff is **rejected as stale** (a `DiffError::Stale`) and `02` may re-base and re-vote, or the controller may re-derive a fresh proposal. This is how Metatron avoids lost updates *without* permanent forks: stale candidates simply do not become head. The default precondition granularity (per-node vs. whole-head) is a tunable policy (Open Question §5-OQ — overlapping concurrent Guardian diffs).
+If a precondition fails at apply-time, the diff is **rejected as stale** (a `DiffError::Stale`) and `02` may re-base and re-vote, or the controller may re-derive a fresh proposal. This is how Metatron avoids lost updates *without* permanent forks: stale candidates simply do not become head. The **default granularity is per-node `NodeUnchanged`** (optimistic concurrency: non-overlapping diffs both land), with conflict *detection* mechanical here and *resolution* deferred to governance — no structural auto-merge (§5.3).
 
 ### 4.4 Merkle collections
 
@@ -462,7 +462,7 @@ How a winning proposal becomes head, and how a loser's transient fork is discard
    - shares H_n as parent  ⇒  it formed a TRANSIENT sibling fork;
    - its advance() failed (expected H_n, but head is now H_{n+1});
    - it is DISCARDED as head. Its nodes were content-addressed writes; any
-     that are now unreferenced become GC candidates (§3.5 / Open Q).
+     that are now unreferenced become GC candidates (§3.5, §5.2).
    - 02 may re-base C_y's proposal onto H_{n+1} and re-run, subject to the
      diff's preconditions (a stale precondition forces an explicit re-derive).
 ```
@@ -484,16 +484,19 @@ Crucially, the fork is **never written to the head** and is **never reconciled**
 /// Canonical ordering for the commit spine. NOT wall-clock (§2.5).
 struct LogicalTime {
     index: u64,        // Lamport counter; head.index = parent.index + 1, gap-free
-    // Optional richer causality for reasoning about concurrent CANDIDATES
-    // before one wins the head. Not part of the canonical spine order.
-    vclock: Option<VersionVector>,   // per-author counters; advisory
+    // The per-author VersionVector (`vclock`) is DROPPED (§5.8): candidate
+    // causality never needs more than "same parent ⇒ concurrent".
 }
+
+/// Display-only, non-authoritative timeline ordering (§5.8). Never load-bearing
+/// for verification or the canonical spine order; like WallHint, for humans/07.
+struct DisplayClock { hlc: HybridLogicalClock }
 
 /// Advisory only — never load-bearing for ordering or verification (§2.5).
 struct WallHint { unix_millis: u64, source: AgentId }   // lives in the decision record (02)
 ```
 
-The `index` totally orders accepted commits (the spine is linear, so it is gap-free and unique). The optional `vclock` exists to let `02` reason about *causally concurrent* candidate proposals (two diffs that both branch from Hₙ are concurrent) before the CAS picks a winner; once a winner is chosen, only `index` matters for the canonical history. Wall-clock survives only as a non-canonical `WallHint` in the decision record for human display and `07` correlation.
+The `index` totally orders accepted commits (the spine is linear, so it is gap-free and unique), and because the head is serialized there is a single writer of the next index — the scalar suffices and the `vclock` is **dropped** (§5.8). For human-readable total-order timelines, a **Hybrid Logical Clock** is carried for **display only**, explicitly non-authoritative. Wall-clock likewise survives only as a non-canonical `WallHint` in the decision record for human display and `07` correlation.
 
 ### 4.8 Read / query interface
 
@@ -557,36 +560,96 @@ struct Signature(/* ... */);  // anchor §7; scheme defined in 08
 //   verify_sig(node_bytes, &sig, author_id) -> bool                            [08]
 // A commit is "authoritative" iff verify_quorum returns true over a Genesis
 // quorum drawn from the KernelSet *as of the parent commit* (avoids the council
-// re-authorizing its own membership change in the same step — see Open Q).
+// re-authorizing its own membership change in the same step). EXCEPTION: a
+// Byzantine-removal AmendKernel must be co-ratified by the POST-change kernel
+// set too — a dual-set signature (§5.4).
 ```
 
 The State plane treats signatures as **opaque blobs it stores and feeds to `08`'s verifier**. It enforces structurally only that the `signatures` field is present and that `verify_authority` (§4.8) is run during verification; it makes no cryptographic decisions itself.
 
 ---
 
-## 5. Open questions & ambiguities
+## 5. Resolved decisions
 
-These are genuine, unresolved design tensions — parked here per the anchor's convention (§9) rather than glossed.
+A design review closed the structural tensions previously parked here. Each item below is now **committed, normative design**. The body sections above remain authoritative; these decisions refine and bind them. They are stated as decided design, not as questions. Exactly one genuinely-open *tuning* parameter remains (§6).
 
-1. **Pruning & retention policy specifics.** §3.5 establishes *that* we snapshot/compact/prune, not the *policy*. Open: retention horizon (time? commit-count? per-layer?); whether snapshots themselves age out or are permanent trust anchors; whether progress-layer churn and configuration-layer history get *different* retention (progress is high-churn/low-long-term-value; configuration is the constitutional record). Who *authorizes* a prune — is it itself a consensus proposal? (Probably yes: pruning is a state-affecting act and should be governed.)
+### 5.1 Pruning is governed, with differential retention
 
-2. **Garbage collection of unreachable nodes.** Losing candidate commits (§4.6) and superseded node versions leave content-addressed nodes that may be unreferenced. Naive refcounting is unsafe under dedup (a "dead" node may be reachable from a live commit by content coincidence) and under concurrent staging (a node being staged for a not-yet-committed candidate looks unreachable). Open: mark-and-sweep from retained anchors vs. generational/epoch GC vs. never-collect-before-snapshot; how to avoid collecting nodes that an in-flight candidate will reference; whether GC must itself be a recorded, signed operation.
+Pruning is a **consensus-proposed operation** — a state-affecting act authored as a proposal and decided by `02` like any other change, never an unprivileged background sweep. Retention is **differential by layer**:
 
-3. **Concurrent Guardians authoring overlapping diffs.** Two Guardians may propose diffs that touch the same node (e.g. both reassign sub-goal 7). The preconditions mechanism (§4.3) makes the *second-to-commit* fail as stale, but: what is the **default precondition granularity** — strict `HeadIs` (serializes everything, simplest, lowest throughput) vs. per-node `NodeUnchanged` (allows non-overlapping diffs to both land, higher throughput, but needs careful conflict detection)? Should the State plane offer *3-way structural merge* of non-conflicting concurrent diffs, or is that explicitly out of scope (forks-are-transient says "no merges")? Is conflict *detection* a State-plane (mechanical) or Governance-plane (judgment) concern? Leaning mechanical-detect, governance-resolve.
+- The **configuration layer is the permanent constitutional record.** The org-chart/kernel history is never pruned below the snapshot line; it is the audit trail of how authority evolved.
+- The **progress layer is prunable** past a retention horizon. High-churn, low-long-term-value detail (superseded task/artifact churn) may be compacted and reclaimed once a snapshot covers it.
 
-4. **Kernel-change authorization window.** A constitutional `AmendKernel` (I3) changes the Genesis set. Whose signatures authorize that commit — the kernel *before* or *after* the change? §4.10 proposes "as of the parent," but a council removing a Byzantine member may need the *new* set to ratify. Interacts heavily with `02`/`08`; unresolved here.
+**Snapshots are permanent, signed trust anchors** — they do not age out. (Refines §3.5.)
 
-5. **Schema/codec evolution.** `schema_version` is reserved on every layer/node, but the migration story is open: how does replay (§3.4) handle a node written under an older codec? Are migrations themselves recorded as governed diffs? Does a snapshot "re-canonicalize" everything to the current codec (changing all hashes below it — a deliberate, signed re-anchoring)?
+### 5.2 Garbage collection: epoch-based mark-and-sweep from retained anchors
 
-6. **Artifact blob residency.** §5.3-implied: world-model holds `ArtifactRef.blob` hashes, but large bytes may live out-of-band (object store, executor filesystem). Open: when is a blob *required* to be in `NodeStore` for a commit to be valid (provenance integrity) vs. allowed to be a dangling reference resolved lazily by `04`? A dangling artifact hash is verifiable-by-address but not retrievable; is that acceptable for the system of record?
+GC of unreachable nodes (losing candidates §4.6, superseded versions) is **epoch-based mark-and-sweep**, not refcounting (refcounting is unsafe under content dedup and under concurrent staging).
 
-7. **Cost of full-history verification at scale.** `verify_integrity`/`verify_replay` from genesis is O(history). Snapshots bound it, but the snapshot cadence vs. verification-cost trade-off, and whether verification can be incremental/streaming for very long-running goals, is open.
+- The **root set** is the retained trust anchors: all **snapshots**, the **current head**, and **in-flight candidate commits**.
+- GC **never collects before the next snapshot** establishes a fresh anchor.
+- An **epoch guard** protects nodes that a not-yet-committed candidate will reference, so staging a candidate cannot race a sweep.
+- **GC is itself a recorded, signed maintenance operation** — reclamation is part of the auditable history, not an invisible side effect.
 
-8. **Logical-clock richness.** §4.7 offers a Lamport `index` (canonical) + optional `vclock` (advisory). Whether the `vclock` is actually needed — i.e. whether `02`'s scheduling ever requires reasoning about candidate causality beyond "same parent ⇒ concurrent" — is unproven. If not, drop `vclock` and keep only the scalar index.
+(Refines §3.5, §4.6.)
+
+### 5.3 Concurrent Guardians: mechanical detect, governance resolve
+
+The **default precondition granularity is per-node `NodeUnchanged`** (§4.3), not strict `HeadIs` — optimistic concurrency, so two **non-overlapping** diffs against the same head both land.
+
+- **Conflict detection is mechanical** — a State-plane operation (the apply-time precondition compare).
+- **Conflict resolution is governance** — a losing diff simply **fails stale** (`DiffError::Stale`) and `02` re-bases or re-derives. The plane makes no merge judgment.
+- **No structural auto-merge.** 3-way structural merge of concurrent diffs is explicitly out of scope; *forks-are-transient* (§2.3) stands.
+
+(Refines §4.3.)
+
+### 5.4 Kernel-change window: dual-set signature for Byzantine removal
+
+A commit is signed by the **kernel set as of the parent** (§4.10) — the council does not re-authorize its own membership change in the same step. The **one exception** is a **Byzantine-removal `AmendKernel`**, which must additionally be **co-ratified by the post-change kernel set**: a **dual-set signature** in which both the pre-change set and the surviving post-change set sign. This prevents a compromised member from blocking their own removal while still grounding authority in a legitimate set. Co-designed with `08`. (Refines §4.10; the `AmendKernel` op, §4.2.)
+
+### 5.5 Schema/codec evolution: retain codecs, govern migrations, re-anchor at snapshot
+
+- **Versioned codecs are retained for replay.** A node written under an older `schema_version` is replayed with the codec it was written under, so replay (§3.4) stays bit-exact.
+- **Migrations are governed diffs** — a schema change is a typed, consensus-decided state update, not an out-of-band rewrite.
+- A **snapshot MAY re-canonicalize** the materialized state to the current codec as a **deliberate, signed re-anchoring.** This changes hashes below the snapshot by design, and the re-anchoring is itself recorded.
+
+(Refines §4.1, §3.5.)
+
+### 5.6 Artifact residency: hash always committed, bytes may resolve lazily
+
+- The artifact's **content `Hash` is always in the commit** (`ArtifactRef.blob`) — provenance integrity is never optional.
+- **Large blob bytes MAY resolve lazily out-of-band** (object store, executor filesystem, via `04`).
+- A commit is **valid with an addressed-but-dangling blob.** The system of record commits to *what* the artifact is, not to physically holding its bytes.
+
+Stated explicitly: **verifiable-by-address ≠ retrievable.** The hash proves identity and provenance offline; retrieval is a separate, best-effort `04`/object-store concern. (Refines §3.3 `ArtifactRef`, §4.5.)
+
+### 5.7 Verification is incremental from the latest snapshot
+
+`verify_integrity`/`verify_replay` (§4.8) run **incrementally/streaming from the latest snapshot forward**, not from genesis. Snapshots are the verification anchor, so steady-state cost is bounded by inter-snapshot history rather than total history. A **periodic full re-verification from genesis runs as a background audit** (defense-in-depth), decoupled from the hot path. (Refines §2.6, §3.5, §4.8.)
+
+### 5.8 Logical clock: keep the scalar Lamport `index`, drop `vclock`, add a display-only HLC
+
+- The scalar **Lamport `index` remains canonical** (§4.7): the serialized head gives a single writer, so a gap-free scalar totally orders the spine — sufficient.
+- The **`vclock` / `VersionVector` is dropped.** Candidate causality never needs more than "same parent ⇒ concurrent," so the per-author vector is unused weight.
+- For human-readable **total-order timelines**, a **Hybrid Logical Clock (HLC)** is added, used for **display only** and explicitly **non-authoritative** (like `WallHint`). It orders events legibly for humans without ever being load-bearing for verification or the canonical spine order.
+
+This also settles `07`'s clock question. (Refines §2.5, §4.7.)
+
+### 5.9 Storage: one content-addressed store, separate retention namespaces (`07` cross-ref)
+
+The immutable **event log** and the **Merkle DAG share one content-addressed store** — a single immutable truth, joined by the commit's content address (`CommitHash`) — with **separate retention namespaces**, so configuration-vs-progress retention (§5.1) and log-vs-DAG compaction are governed independently over the same underlying blobs. This answers the `07` storage cross-reference. (Refines §3.1, §4.5; cross-refs `07`.)
 
 ---
 
-## 6. Relationships to other specs
+## 6. Open questions & ambiguities
+
+The design review (§5) closed the structural questions. One genuinely-open item remains — and it is a **tuning parameter, not a design choice**:
+
+1. **Snapshot cadence vs. verification-cost tuning (and exact retention horizons).** How often to cut a snapshot trades incremental verification/replay cost (§5.7) against snapshot-production overhead and prunable-history depth; and the exact **retention horizons** for the prunable progress layer (§5.1) — time? commit-count? per-class? — are likewise workload-dependent. These are **empirical parameters to be tuned against real workloads**, not resolved on paper. The mechanisms they parameterize (incremental verification, governed differential-retention pruning) are fixed by §5.
+
+---
+
+## 7. Relationships to other specs
 
 | Spec | Relationship |
 |------|--------------|
@@ -597,4 +660,4 @@ These are genuine, unresolved design tensions — parked here per the anchor's c
 | **`05-agent-jit.md`** | Produces `SetTier` diffs (Compiler flow) that this plane applies to `AgentNode.tier`. `Tier` is the anchor §7 enum, owned by `05`; stored here as configuration. |
 | **`06-interaction-and-mailbox.md`** | Guardians (its agents) author the `TypedDiff`s this plane applies. The `OpenQuestion`/`AnswerQuestion` ops and the `blocked_on` invariant (I6) realize the anchor §5 "block until answered." Normalized user goals become `GoalNode`/`SubGoal`. |
 | **`07-observability.md`** | Taps the history. Builds the *derived, rebuildable* secondary indexes (§3.6) for fast `agent_history`/`subgoal_history`; correlates the advisory `WallHint`. Never canonical — always reconstructable from the spine, so it cannot corrupt the record. |
-| **`08-trust-and-security.md`** | Owns `AgentId` derivation, the `Signature` scheme, the `verify_quorum`/`verify_sig` predicates this plane calls (§4.10), reputation (referenced advisorily from `AgentNode`), and the Byzantine-response policy behind kernel amendments (Open Q #4). This plane defines only the hooks. |
+| **`08-trust-and-security.md`** | Owns `AgentId` derivation, the `Signature` scheme, the `verify_quorum`/`verify_sig` predicates this plane calls (§4.10), reputation (referenced advisorily from `AgentNode`), and the Byzantine-response policy behind kernel amendments (dual-set co-ratification, §5.4). This plane defines only the hooks. |

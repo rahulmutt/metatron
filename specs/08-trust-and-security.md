@@ -26,16 +26,19 @@ This spec specifies the mechanisms that deliver those three properties, and lays
 
 | Concept | Meaning in Metatron |
 |---|---|
-| **Identity** | An `AgentId` is the content hash of an agent's **public key** (`00 §7`). Identity *is* the key: to be an agent is to hold a private key whose public half hashes to your `AgentId`. |
-| **Keypair** | The asymmetric signing keypair an agent holds. The private half never leaves the agent's isolation boundary; the public half is published in the configuration layer. |
-| **Signature** | A detached cryptographic signature over a canonical byte-serialization of a typed artifact (`Vote`, `Proposal`, `Commit`-witness). The opaque `Signature` type of `00 §7`, given structure here. |
+| **Identity** | An `AgentId` is the content hash of an agent's **long-term identity key**, recorded in the configuration layer (`00 §7`). It is a *stable* id: it does **not** change when the agent's operational signing key rotates. Identity is the durable anchor; the key that actually signs is a separable, rotatable artifact bound to it (§3.1). |
+| **Keypair** | An agent holds a long-term **identity keypair** (whose public half's hash *is* the `AgentId`) and a rotatable **operational signing keypair** referenced from its `AgentRecord`. Private halves never leave the agent's isolation boundary; public halves are published in the configuration layer. |
+| **Workload identity (SVID)** | The short-lived runtime credential (`Svid`, §3.8) a live agent process presents to reach external tools. Issued by SPIRE only after a Metatron workload attestor confirms the agent's on-state facts; auto-rotates every few minutes. Binds the durable `AgentId` to a running workload. |
+| **External user (principal)** | A human (or external system) that sets goals/budgets. A **separate principal type from `AgentId`**, authenticated at the API boundary (`06`) with per-user authorization scopes. Metatron is **multi-user**: multiple users may drive the system concurrently (§3.9). |
+| **`mcp-auth-proxy`** | A separately-deployed, **user-controlled** trust boundary that brokers all downstream MCP tool calls and holds the user's downstream secrets. Metatron core holds no downstream secrets; it only *asserts* signed agent identity + scopes (§3.8, `09`). |
+| **Signature** | A detached cryptographic signature over a canonical byte-serialization of a typed artifact (`Vote`, `Proposal`, `Commit`-witness). The opaque `Signature` type of `00 §7`, given structure here. Signatures are **scheme-tagged** (`SigScheme`); the default is a hybrid composite `Hybrid(Ed25519, MlDsa)` whose verification requires *both* (§3.2). |
 | **Quorum / threshold signature** | The set of Genesis signatures that witnesses an accepted decision. A commit is valid only if it carries a quorum that meets the consensus threshold for the change class (⅔ ordinary, ¾ constitutional). |
 | **Reputation** | `Reputation(f32)` in `[0,1]` (`00 §7`). The dynamics live in `02`; here it is framed as the **probabilistic-trust substrate** — the thing that makes "probabilistically Byzantine fault tolerant" a real, quantified property rather than a slogan. |
 | **Capability** | An unforgeable, least-privilege grant: "this agent, in this role, may do this specific thing." A harness's permission set is a bundle of capabilities derived from its role. |
 | **Trust boundary** | A line across which data or control passes from a less-trusted to a more-trusted domain (user → Guardian, harness output → state plane, dynamic agent → kernel). Each boundary has a defined verification obligation. |
 | **Off-protocol / out-of-character** | An agent acting outside the behavior its role and track record predict. The *core* probabilistically-Byzantine event; detected by Sentinels (`07`), priced by reputation (`02`). |
 | **Kernel** | The privileged Guardian + Genesis roles (`00 §3`). Changing kernel membership is a constitutional amendment. The kernel is the trust root of the running system. |
-| **Trust root / genesis ceremony** | The bootstrap act that establishes the very first kernel keys before any consensus exists to authorize them. The one place trust is *asserted*, not *derived*. |
+| **Trust root / genesis ceremony** | The bootstrap act that establishes the very first kernel keys before any consensus exists to authorize them. The one place trust is *asserted*, not *derived*. The genesis root is a **threshold of founders** (m-of-n): an offline, threshold-split root CA, with SPIRE running as an online intermediate issuer chained to it (§3.7). |
 
 ### 2.1 Trust boundaries (the map)
 
@@ -43,17 +46,21 @@ This spec specifies the mechanisms that deliver those three properties, and lays
                        UNTRUSTED                          │            TRUSTED
                                                           │
   external user ──user instr.──▶ Guardian (Interaction) ──┼─▶ typed Proposal ──▶ Genesis council
-   (06 authn,                     · injection-scrub       │     (signed)            (02 verify+vote)
-    deferred here)                · normalize to goal      │                            │
-                                                          │                  signed Decision + quorum
+   (06 authn; SEPARATE           · injection-scrub       │     (signed)            (02 verify+vote)
+    principal type;              · normalize to goal      │                            │
+    per-user scopes §3.9)                                 │                  signed Decision + quorum
   user content / web ──read──▶ Worker harness (Execution)─┼─▶ HarnessResult ──▶ deterministic verify
    (untrusted bytes)            · capability-sandboxed     │   (untrusted)        (02 determinism-first)
                                 · injection-scrub          │                            │
                                                           │                     signed Commit ──▶ Merkle DAG
                                                           │                            (01, append-only)
+  Worker harness ──MCP call (asserted AgentId+scopes)─────┼─▶ mcp-auth-proxy ──▶ downstream MCP server
+   (no downstream secret)        · short-lived SVID        │   (USER-controlled;   (real credential injected
+                                · gateway-only            │    holds the vault)    by the proxy, §3.8)
   ────────────────────────────────────────────────────────────────────────────────────────────────
    Everything left of the line is treated as adversarial until a deterministic check or a
-   signed quorum moves it across. Sentinels (07) watch the whole picture for off-protocol drift.
+   signed quorum moves it across. The mcp-auth-proxy is a distinct, user-owned trust boundary
+   reached via SPIFFE federation. Sentinels (07) watch the whole picture for off-protocol drift.
 ```
 
 Two rules govern every boundary:
@@ -67,50 +74,71 @@ Two rules govern every boundary:
 
 ### 3.1 Identity & key management
 
-**Identity is a public key.** Per `00 §7`, `AgentId = Hash` and is *public-key-derived*. Concretely:
+**Stable identity, rotatable key (NORMATIVE).** Per `00 §7`, `AgentId = Hash`. We **decouple** the `AgentId` from the raw operational signing key. The `AgentId` is the hash of an agent's **long-term identity key** and is recorded in the configuration layer; it is *stable across key rotation*. The **operational signing key** — the key that actually signs `Vote`s, `Proposal`s, and commit-witnesses day to day — is a separate, **rotatable** artifact *referenced from* the agent's `AgentRecord`.
 
 ```rust
-/// A public signing key (e.g. Ed25519 verifying key, 32 bytes).
-struct PublicKey([u8; 32]);
+/// A public signing key. With hybrid PQ (§3.2) this is a scheme-tagged composite,
+/// not necessarily 32 bytes; the tag travels with it.
+struct PublicKey(/* scheme-tagged verifying material */);
 
 /// The private half; NEVER serialized into any commit, proposal, or telemetry.
 /// Lives only inside the agent's isolation boundary (§3.5).
 struct SecretKey(/* opaque, zeroized on drop */);
 
-/// AgentId is the content address of the public key, so identity is self-certifying:
-/// anyone can recompute AgentId from a presented PublicKey and check it matches.
-fn agent_id(pk: &PublicKey) -> AgentId {
-    blake3(DOMAIN_AGENT_ID, pk.0)   // domain-separated; = type Hash = [u8;32] (00 §7)
+/// AgentId is the content address of the LONG-TERM IDENTITY key, scheme-tagged so a
+/// future scheme change does not collide historical ids (§3.2). Stable across rotation.
+fn agent_id(identity_pk: &PublicKey) -> AgentId {
+    blake3(DOMAIN_AGENT_ID, scheme_tag(identity_pk), bytes(identity_pk))  // = type Hash (00 §7)
 }
 ```
 
-Because `AgentId` is the hash of the key, identity is **self-certifying**: presenting a public key whose hash equals the claimed `AgentId` *is* the proof that you are addressing the right key. There is no separate identity registry to trust; the binding `AgentId ↔ PublicKey` is verifiable by anyone with a hash function.
+Identity remains **self-certifying**: presenting a long-term identity key whose scheme-tagged hash equals the claimed `AgentId` *is* the proof you are addressing the right principal. There is no separate identity registry to trust. What is *not* baked into the id is the operational key, which can change without minting a new identity, retiring reputation, or rewriting history.
 
-**Proving identity (challenge–response).** To act, an agent does not present its key — it *signs*. Possession of the secret key is demonstrated per-artifact: every `Vote`, every `Proposal`, every commit-witness carries a signature that verifies against the public key whose hash is the claimed `AgentId`. For liveness handshakes (a backend admitting an actor, a harness session opening), a standard challenge–response is used:
+**Key rotation = a governed config-layer diff (NORMATIVE).** Rotating an agent's operational key is an ordinary typed diff on the configuration layer that **re-binds** `AgentRecord.operational_key` to the new key. Because the `AgentId` is unchanged, the record's `reputation` is **carried over per the class-prior policy** (§3.3.1): the rotated agent does not start fresh, but inherits a *discounted* prior that decays toward freshly-earned reputation. Every rotation is therefore consensus-witnessed, attributable, and permanent in the Merkle history.
+
+**Emergency revocation (NORMATIVE).** A leaked or suspected-compromised operational key cannot wait a full ordinary-consensus cycle. Metatron provides a **small, time-boxed, heavily-audited fast-path quorum** that may revoke an operational key immediately, placing the agent in `Quarantined` pending full adjudication (§3.6). The fast path is deliberately narrow — it can *revoke/freeze* but never *grant power* — its actions are time-boxed, require a quorum (never a single operator), and leave a full evidence trail and a chained `Commit`, so the fast path itself is not a stealth escalation surface.
 
 ```rust
-/// Verifier sends a fresh nonce; agent returns sign(nonce). Proves key possession
-/// without revealing it and without replayability (nonce is single-use, time-boxed).
+/// Lives in the configuration layer; a Quarantine-class diff signed by the fast-path quorum.
+struct EmergencyRevocation {
+    agent: AgentId,                 // identity is stable; only the operational key is revoked
+    revoked_key: PublicKey,         // the operational key being invalidated
+    expires: LogicalTime,           // time-boxed: auto-lapses into full adjudication (§3.6)
+    quorum: QuorumCertificate,      // fast-path quorum witness; never a single signer
+    evidence: Hash,                 // content address of the Sentinel/07 evidence bundle
+}
+```
+
+**Proving identity (challenge–response).** To act, an agent does not present its key — it *signs* with its current operational key. Possession is demonstrated per-artifact: every `Vote`, `Proposal`, and commit-witness carries a signature that verifies against the *operational* public key bound to the claimed `AgentId` in the configuration layer. For liveness handshakes (a backend admitting an actor, the workload attestor admitting a process, §3.8), a standard challenge–response is used:
+
+```rust
+/// Verifier sends a fresh nonce; agent returns sign(nonce). Proves operational-key
+/// possession without revealing it and without replayability (nonce single-use, time-boxed).
 struct IdentityChallenge { nonce: [u8; 32], expires: LogicalTime }
 struct IdentityProof     { agent: AgentId, sig: Signature }
 ```
 
-**Where keys live.** The secret key is bound to the agent's isolation boundary (§3.5) — an in-process actor's owned memory under `RustActorBackend`, or a pod/secret under `KubernetesCrdBackend`. The orchestrator never holds Worker secret keys; it holds only the *public* keys published in the configuration layer. Kernel (Genesis/Guardian) secret keys are the system's crown jewels and warrant the strongest available custody (HSM / sealed secret / enclave — see Open Questions on custody).
+**Where keys live.** Secret keys are bound to the agent's isolation boundary (§3.5) — an in-process actor's owned memory under `RustActorBackend`, or a pod/secret under `KubernetesCrdBackend`. The orchestrator never holds Worker secret keys; it holds only the *public* keys published in the configuration layer. Kernel (Genesis/Guardian) secret keys are the system's crown jewels and warrant the strongest available custody (the genesis root is a threshold-split offline CA, §3.7; per-mechanism custody specifics remain open, §5).
 
 **Binding identity to role (the `01` link).** A role is *not* a property of the key; it is a property of the **configuration layer** of the world-model. The org-chart entry for an agent binds its `AgentId` (hence its public key) to a role:
 
 ```rust
 /// Lives in the configuration layer (01); changed only by a consensus-accepted diff.
 struct AgentRecord {
-    id: AgentId,            // = hash(public_key)
-    public_key: PublicKey,  // published here so verifiers need no out-of-band lookup
-    role: Role,             // Guardian | Genesis | Worker | Compiler | Sentinel (00 §3)
-    class: AgentClass,      // harness/profile binding (04)
-    capabilities: CapabilitySet,   // least-privilege grant derived from role (§3.5)
-    reputation: Reputation, // 00 §7; dynamics in 02
-    status: AgentStatus,    // Active | Quarantined | Removed (§3.6)
+    id: AgentId,                // = hash(identity_key); STABLE across operational-key rotation
+    identity_key: PublicKey,    // long-term key whose scheme-tagged hash IS the AgentId
+    operational_key: PublicKey, // ROTATABLE signing key; re-bound by a governed diff (§3.1)
+    role: Role,                 // Guardian | Genesis | Worker | Compiler | Sentinel (00 §3)
+    class: AgentClass,          // harness/profile binding (04); source of the reputation class-prior (§3.3.1)
+    capabilities: CapabilitySet, // least-privilege grant derived from role (§3.5)
+    reputation: Reputation,     // 00 §7; dynamics in 02; class-prior-with-decay on spawn/rotation (§3.3.1)
+    provenance: Provenance,     // the spawning Decision that created this agent (Sybil binding, §3.6)
+    status: AgentStatus,        // Active | Quarantined | Removed (§3.6)
 }
 enum Role { Guardian, Genesis, Worker, Compiler, Sentinel }
+
+/// Binds a spawned agent's identity to the consensus decision that authorized it (§3.6).
+struct Provenance { spawn_decision: Hash, spawned_by: AgentId, spawned_at: LogicalTime }
 ```
 
 Consequences of putting role in state, not in the key:
@@ -123,20 +151,31 @@ Consequences of putting role in state, not in the key:
 
 **One canonical serialization.** Every signable artifact has a deterministic, domain-separated canonical byte form. Signatures are computed over `domain_tag || canonical_bytes(artifact)` so a signature for one artifact type can never be replayed as another (domain separation), and so two agents serializing the same logical artifact produce identical bytes (determinism-first, `00 §6.2`).
 
+**Hybrid composite signatures by default (NORMATIVE, post-quantum).** `SigScheme` is crypto-agile and the default is a **hybrid composite** that requires *both* a classical and a PQ signature to verify. An artifact is authentic only if **both** component signatures verify; breaking it requires breaking Ed25519 **and** ML-DSA. The scheme **tag travels with every signature**, so historical artifacts remain verifiable under the scheme they were signed with even after the default advances.
+
 ```rust
 struct Signature {
-    scheme: SigScheme,     // Ed25519 default; agile (see Open Questions)
-    bytes:  [u8; 64],      // detached signature
+    scheme: SigScheme,     // travels with the signature; default Hybrid(Ed25519, MlDsa)
+    bytes:  Vec<u8>,       // detached; length depends on scheme (composite = both components)
 }
-enum SigScheme { Ed25519 /* , future: Ed448, ML-DSA for PQ */ }
+/// Default = Hybrid(Ed25519, MlDsa): BOTH components must verify (composite).
+enum SigScheme { Ed25519, MlDsa, Hybrid(Box<SigScheme>, Box<SigScheme>) }
+
+/// Transport / secret-wrapping uses a HYBRID KEM (HPKE-hybrid): X25519 + ML-KEM.
+/// A shared secret is derived only if BOTH KEMs agree. Used for SVID issuance,
+/// challenge channels, and any wrapping of secret material in transit (§3.8).
+enum KemScheme { X25519, MlKem, Hybrid(Box<KemScheme>, Box<KemScheme>) } // default Hybrid(X25519, MlKem)
 
 const DOMAIN_VOTE:     &[u8] = b"metatron:v1:vote";
 const DOMAIN_PROPOSAL: &[u8] = b"metatron:v1:proposal";
 const DOMAIN_COMMIT:   &[u8] = b"metatron:v1:commit-witness";
 
 fn sign<T: Canonical>(sk: &SecretKey, domain: &[u8], artifact: &T) -> Signature;
+/// Verifies EVERY component of a composite scheme; a Hybrid verifies iff both halves do.
 fn verify<T: Canonical>(pk: &PublicKey, domain: &[u8], artifact: &T, sig: &Signature) -> bool;
 ```
+
+Because `AgentId` is a **scheme-tagged** key hash (§3.1), a future scheme change mints distinct ids in the new scheme space without colliding the old, and each historical signature carries the scheme needed to re-verify it. PQ migration *timeline* and SVID re-issuance across a scheme change remain open (§5).
 
 **What gets signed, by whom:**
 
@@ -153,21 +192,26 @@ Note `Vote.signature` and `Commit.signatures` are exactly the fields the overvie
 ```rust
 /// The witness attached to a Commit. Validity is checked against the Genesis set
 /// AS OF the parent commit's configuration layer (membership can change over time).
+/// v1 keeps the EXPLICIT signer set (08-#6 resolved): signers[i] cast sigs[i].
 struct QuorumCertificate {
-    decision: Hash,                  // the Decision this witnesses (00 §7)
-    signers:  Vec<(AgentId, Signature)>, // each verifies under DOMAIN_COMMIT
-    threshold_class: ThresholdClass, // Ordinary | Constitutional
+    signers: Vec<AgentId>,   // WHO signed — explicit for reputation accounting + equivocation detection
+    sigs:    Vec<Signature>, // parallel to `signers`; each verifies under DOMAIN_COMMIT
+    scheme:  SigScheme,      // the scheme this quorum used; default Hybrid(Ed25519, MlDsa) (§3.2)
 }
-enum ThresholdClass { Ordinary, Constitutional }
+
+/// The change class is DERIVED from the proposal/decision being witnessed (kernel-membership
+/// diffs are Constitutional, all else Ordinary, §3.4) — not stored in the cert.
+enum ThresholdClass { Ordinary /* 2/3 */, Constitutional /* 3/4 */ }
 
 /// A commit is accepted iff its quorum is valid for its change class.
-fn quorum_valid(qc: &QuorumCertificate, genesis_set: &GenesisSet, weights: &ReputationMap) -> bool {
-    let need = match qc.threshold_class {
+fn quorum_valid(qc: &QuorumCertificate, class: ThresholdClass,
+                genesis_set: &GenesisSet, weights: &ReputationMap) -> bool {
+    let need = match class {
         ThresholdClass::Ordinary       => 2.0 / 3.0,   // 00 §6
         ThresholdClass::Constitutional => 3.0 / 4.0,
     };
-    // 1. every signer is a current Genesis member (role lookup in config layer)
-    // 2. every signature verifies under DOMAIN_COMMIT
+    // 1. signers.len() == sigs.len(); every signer is a current Genesis member (config-layer lookup)
+    // 2. every sigs[i] verifies under DOMAIN_COMMIT against signers[i]'s operational key
     // 3. no AgentId appears twice (equivocation guard, §3.3)
     // 4. reputation-weighted sum of valid signers / total Genesis weight >= need
     weighted_fraction(qc, genesis_set, weights) >= need
@@ -176,7 +220,7 @@ fn quorum_valid(qc: &QuorumCertificate, genesis_set: &GenesisSet, weights: &Repu
 
 The threshold is **reputation-weighted**, consistent with `00 §6` ("reputation-weighted ⅔/¾"): the quorum is not a raw headcount but a sum of signer reputations over total Genesis reputation. This is the cryptographic expression of "weight by calibrated track record" — a chronically-drifting Genesis member's signature still verifies, but counts for less toward the threshold (§3.3).
 
-> **Aggregation, parked.** Whether to later replace the signature *set* with a true threshold/aggregate signature (BLS multisig, FROST) for compactness and one-shot verification is an Open Question (§5). The `QuorumCertificate` type is the stable interface either way.
+> **Aggregation (RESOLVED for v1).** v1 **keeps the explicit signer set** (`QuorumCertificate.signers`). The explicit set is *required* now: reputation accounting needs to know *which* members signed, and equivocation detection needs per-signer attribution — both of which a single opaque aggregate would obscure. A true threshold/aggregate signature (BLS multisig, FROST) for compact one-shot verification is a **future optimization** that can land **behind the stable `QuorumCertificate` interface** without disturbing callers.
 
 ### 3.3 Reputation as the trust substrate
 
@@ -201,9 +245,24 @@ Framing (the security view; dynamics are `02`):
 - **Ballot-stuffing / easy wins.** An agent farms reputation by voting on trivially-verifiable proposals it cannot get wrong. *Mitigation framing:* reputation gain must be weighted by proposal difficulty/informativeness, and determinism-first means trivially-checkable proposals are *checked, not voted*, so they yield little reputational credit.
 - **Sleeper / long-con.** An agent behaves to accrue high reputation, then defects on one high-stakes constitutional vote. *Mitigation framing:* this is exactly why kernel changes need ¾ *and* a signed quorum *and* leave a Merkle trail — one high-rep defector cannot reach ¾ alone, and the defection is permanently attributable (§3.4, §3.7). Reputation also decays, so a long quiet period does not bank unlimited influence.
 - **Collusion to inflate.** A clique up-rates each other. *Mitigation framing:* reputation is updated against *ground truth*, not peer approval, so mutual praise without correct outcomes does not move it; Sentinels (`07`) watch for correlated voting blocs and surface them as a divergence/anomaly signal.
-- **Sybil amplification.** Spawn many agents to dilute or swamp weighting. *Mitigation framing:* see §3.6 and Open Questions — new agents earn reputation *fresh from a floor*, so spawning identities yields no immediate weight; and spawning is itself consensus-gated.
+- **Sybil amplification.** Spawn many agents to dilute or swamp weighting. *Mitigation framing:* spawning is **consensus-gated**, each spawn is **rate-limited**, every spawned agent inherits only a **class-prior fresh-reputation floor** (a *discounted* prior, §3.3.1) so identities carry little immediate weight, and each spawned identity is **bound to the spawning Decision** via `AgentRecord.provenance` (§3.6) so manufactured identities are attributable to the decision that authorized them. The full Sybil-resistance design is now settled (§3.6); staking is deferred.
 
 The security claim is therefore explicit and bounded: **Metatron tolerates agents that act out of character with probability bounded away from 1, by pricing their influence through reputation and gating high-blast-radius changes behind thresholds those agents cannot individually reach.** It does *not* claim to tolerate a reputation-weighted majority that is *simultaneously* compromised — that is the residual trust assumption, stated plainly (§5).
+
+#### 3.3.1 Reputation acquisition — class-prior with decay (NORMATIVE)
+
+A long-running tension is whether a new (or key-rotated) agent must **earn reputation fresh from a floor** or may **inherit** it. The decision: **class-prior with decay** — neither fully earned-fresh nor fully transferable.
+
+- **A new or key-rotated agent inherits a *discounted* reputation prior** drawn from its **role / class / predecessor** (`AgentRecord.class`, §3.1): a freshly spawned instance of a known-good Worker class, or an agent that has merely rotated its operational key, does not start from zero.
+- **The prior is discounted and *decays toward freshly-earned reputation*.** The inherited component is weighted below a fully-established agent's and bleeds off over time/activity, so within a bounded window the agent's reputation is dominated by what *it* has actually demonstrated against ground truth (`02`).
+
+This is deliberately a **middle path** between the two rejected extremes:
+
+| Rejected: earned-fresh | Rejected: fully transferable | **Chosen: class-prior with decay** |
+|---|---|---|
+| Safe (no trust laundering) but punishes legitimate rotation and re-spawn of known-good classes. | Ergonomic but a gaming vector (sell/lease a high-rep identity; instant Sybil weight). | Bootstraps legitimate spawns/rotations from a *discounted* prior that **cannot be banked or sold** — it decays to earned reputation, so it grants momentum, not standing influence. |
+
+Why this is also a **Sybil and rotation control:** because the prior is *discounted* and *decaying*, mass-spawning identities of a good class yields little immediate weight (Sybil, §3.6), while a legitimate key rotation (§3.1) keeps its hard-won reputation rather than being punished with a cold start. The exact **prior magnitude and decay schedule are empirical** and remain open (§5).
 
 ### 3.4 Kernel protection
 
@@ -212,7 +271,7 @@ The kernel (Guardian + Genesis) is the running system's **trust root**: Genesis 
 **Mechanism:** A diff to the configuration layer that adds, removes, or re-roles a Guardian or Genesis member is classified `ThresholdClass::Constitutional` and requires:
 
 1. **¾ reputation-weighted consensus** (`00 §6`), not the ordinary ⅔.
-2. A **`QuorumCertificate` of constitutional class** — i.e. ¾ of *current* Genesis, by reputation weight, must individually sign the resulting commit witness. The membership and weights are evaluated **as of the parent commit**, so a proposal cannot edit the electorate that judges it within the same step (no self-dealing the quorum).
+2. A **`QuorumCertificate` validated at the constitutional ¾ threshold** (the change class is *derived* from the diff touching kernel membership, §3.2) — i.e. ¾ of *current* Genesis, by reputation weight, must individually sign the resulting commit witness. The membership and weights are evaluated **as of the parent commit**, so a proposal cannot edit the electorate that judges it within the same step (no self-dealing the quorum).
 3. The change to land as an ordinary signed `Commit` in the Merkle DAG — same machinery as any other state update, no side channel.
 
 **Security rationale — why ¾ and why on-chain:**
@@ -319,9 +378,26 @@ enum AgentStatus {
 - **Removal** retires the `AgentRecord`; the key is no longer an accepted signer. The record remains in the Merkle history (removal is never erasure — §3.4), so the agent's entire tenure stays auditable.
 - **Graceful, not cliff-edge.** Crucially, by the time a quarantine/removal proposal is even raised, reputation weighting has *already* discounted the misbehaving agent's influence (§3.3). Detection-and-exclusion is the *cleanup*; the *tolerance* came from the continuous down-pricing.
 
+**Sybil-resistant spawning (NORMATIVE).** Creating an agent is not a private act; it is a **consensus-gated** typed diff on the configuration layer, and the resolved design layers four controls so that spawning cannot manufacture influence:
+
+1. **Consensus gate.** A spawn is an ordinary (⅔) `TypedDiff`; no agent self-spawns.
+2. **Class-prior fresh-reputation floor.** The new `AgentRecord.reputation` is the *discounted, decaying* class prior of §3.3.1 — identities carry little immediate weight.
+3. **Per-spawn rate limits.** A bounded spawn rate (per spawner, per class, per window) caps how fast identities can be manufactured, denying an adversary who controls proposal flow a fast Sybil ramp.
+4. **Provenance binding.** Each spawned agent's identity is bound to the **spawning Decision** via `AgentRecord.provenance` (§3.1), so every identity is permanently attributable to the consensus that authorized it — and the workload attestor (§3.8) refuses to issue an SVID to any agent not present in the current configuration layer.
+
+*Staking is explicitly deferred* — these four controls are judged sufficient for v1; a per-spawn economic cost can be layered later without disturbing the interface.
+
+**Quarantine: reversible, adjudicated, and protected against weaponization (NORMATIVE).** Quarantine is **reversible by design**. The full lifecycle:
+
+- **Adjudication on evidence.** A quarantine is a *governed adjudication* over Sentinel/`07` evidence (the `evidence: Hash` bundle, §3.1), not an unreviewable flag. The detection→price→act chain above raises it; the council judges it on the recorded evidence trail.
+- **Reinstatement by consensus.** Lifting a quarantine (`Quarantined → Active`) is itself a consensus-accepted diff — reinstatement is a council decision, not an operator toggle.
+- **Anti-weaponization.** To stop a faction from using quarantine to silence an honest minority, a quarantine/removal requires a **quorum** plus the **evidence trail**, and a Byzantine-*removal* commit (kernel members especially) is protected by a **"dual-set" minority protection**: a removal that changes the kernel set must be **co-ratified by the POST-change kernel set** as well as the prior electorate, so a bare majority cannot unilaterally purge a minority and immediately ratify its own purge. (Co-designed with `01-#4`; interacts with the constitutional-quorum rule of §3.4.)
+
 ### 3.7 The genesis ceremony (bootstrapping the trust root)
 
 Every derived trust in §3.1–§3.4 chains back to *some* first kernel that no prior consensus authorized — the classic bootstrap problem. Metatron isolates this into one explicit, auditable act:
+
+**Genesis trust root = threshold of founders (NORMATIVE).** *Who* may sign genesis is now decided: the genesis trust root is an **m-of-n threshold of founders**, not a single operator. Concretely, the genesis **root CA is an offline, threshold-split root** — its key material exists only as an m-of-n split held by the founders and is brought together only for ceremonies — and **SPIRE runs as an *online* intermediate issuer whose CA chains to that offline root** (§3.8). The online issuer can be rotated or revoked under the offline root without re-running genesis; the offline root itself is touched only rarely, under threshold.
 
 ```rust
 /// The root commit: parent == None (matches Commit.parent: Option<Hash>, 00 §7).
@@ -330,12 +406,94 @@ Every derived trust in §3.1–§3.4 chains back to *some* first kernel that no 
 /// that did not yet exist.
 struct GenesisCeremony {
     initial_config: WorldModel,      // config layer naming the first Guardian/Genesis AgentIds + pubkeys
-    operator_attestations: Vec<Signature>, // out-of-band signers (founding operators / threshold of seed keys)
+    founder_attestations: Vec<Signature>, // m-of-n THRESHOLD of founders (offline threshold-split root)
+    threshold: (u8, u8),             // (m, n): how many of the founder shares must attest
+    issuer_ca: CertChain,            // online SPIRE intermediate issuer, chained to the offline root
     transcript: Hash,                // content address of the full, publishable ceremony record
 }
 ```
 
-Properties we *do* fix: the genesis commit has `parent == None` (consistent with `00 §7`), publishes the founding kernel public keys in the configuration layer, and is itself content-addressed so the entire derived history is anchored to one auditable root. From the *second* commit onward, all the derived machinery (§3.2–§3.4) applies. *Who* may sign genesis, and how seed keys are held, are parked in Open Questions — this is a genuine trust-root policy decision, not an implementation detail.
+Properties we *do* fix: the genesis commit has `parent == None` (consistent with `00 §7`), requires an **m-of-n founder threshold** to attest, publishes the founding kernel public keys in the configuration layer, establishes the SPIRE intermediate-issuer chain (§3.8), and is itself content-addressed so the entire derived history is anchored to one auditable root. From the *second* commit onward, all the derived machinery (§3.2–§3.4) applies. What remains open is **not** *who signs* (settled: threshold of founders) but the **operational ceremony details** — the concrete custody mechanism for the founder shares (HSM vs. enclave vs. threshold-split specifics) and the ceremony runbook (§5).
+
+### 3.8 Agent identity & authorization to external tools (MCP)
+
+The mechanisms of §3.1–§3.5 secure an agent's identity and authority *inside* Metatron. This section specifies how a running agent proves who it is to the *outside* world and reaches **external tools over MCP** without ever holding a downstream secret. The full proxy design lives in **`09-mcp-auth-proxy.md`**; here we give the **trust/identity view**.
+
+**Identity infrastructure: SPIFFE/SPIRE + a Metatron workload attestor (NORMATIVE).** Metatron adopts **SPIFFE/SPIRE** as the workload-identity framework — SVID issuance, rotation, and federation — rather than re-inventing it. SPIRE alone, however, attests *infrastructure* facts (which process/pod is asking); it knows nothing of Metatron's governed on-chain identity. We therefore add a **custom Metatron workload attestor**. Before SPIRE issues an SVID to an agent process, the attestor checks four **on-state facts against the CURRENT HEAD**:
+
+1. the agent **exists** in the current head's **configuration layer** (an `AgentRecord` with a live `id`);
+2. it **holds the claimed operational key** — proven by **challenge–response** (§3.1) against `AgentRecord.operational_key`;
+3. its reputation is **above the reputation floor**; and
+4. its `status` is **not `Quarantined`** (and the key is not in an active `EmergencyRevocation`, §3.1).
+
+Only if all four hold does SPIRE mint the SVID. This **binds the runtime workload to the governed on-chain identity** — a process cannot obtain a workload credential for an agent the council has not authorized — and so the attestor is **also the Sybil gate** (a manufactured identity that never cleared consensus-gated spawning, §3.6, simply fails fact 1).
+
+**SVID naming and lifetime.** SVIDs name the durable identity and the role, and are deliberately **short-lived**:
+
+```
+spiffe://metatron.<deployment>/agent/<AgentId>/role/<role>
+```
+
+- The `AgentId` segment is **durable** (stable across operational-key rotation, §3.1); the SVID *credential* is **short-lived (minutes)** and **auto-rotates** via SPIRE. A stolen SVID is therefore bounded to a minutes-long live window, not a standing credential.
+
+```rust
+/// The short-lived workload credential a live agent presents to the proxy.
+struct Svid {
+    spiffe_id: SpiffeId,        // spiffe://metatron.<deployment>/agent/<AgentId>/role/<role>
+    agent_id: AgentId,          // durable identity (00 §7); survives key rotation
+    operational_key: PublicKey, // the key the attestor challenge-verified (§3.1)
+    scopes: Vec<Scope>,         // COARSE authz scopes derived from the config layer (below)
+    not_after: LogicalTime,     // minutes; auto-rotated by SPIRE
+    issuer_chain: CertChain,    // chains to the online SPIRE issuer, then the offline root (§3.7)
+    issuer_sig: Signature,      // hybrid-composite by default (§3.2)
+}
+
+/// A coarse authorization scope: which MCP server, which method patterns.
+struct Scope { resource: McpServerId, methods: Vec<MethodPattern> }
+```
+
+**The `mcp-auth-proxy` — a separate, user-controlled trust boundary.** The proxy is a **separately-deployed component** and a **distinct trust boundary that the *user* controls**. It holds the **user's downstream secrets / vault** (API tokens, OAuth credentials for the real MCP servers). The crucial split:
+
+- **Metatron core holds NO downstream secrets.** It only **asserts**, cryptographically, an agent's **identity + scopes** (the SVID). It cannot, even if fully compromised, exfiltrate a downstream credential it never held.
+- **The proxy trusts Metatron via SPIFFE *federation*.** The proxy is configured to trust **Metatron's identity-issuer trust bundle** (the SPIRE issuer of §3.7). Federation — not a shared secret — is what lets the user-owned proxy verify that an incoming SVID was minted by the Metatron it federates with.
+
+**Gateway-only brokering (NORMATIVE).** All downstream MCP calls are **brokered *through* the proxy**, which **injects the real credential** at the boundary. **Agents NEVER receive any downstream token.** An agent presents its SVID and the intended call; the proxy authorizes the call against the SVID's scopes, attaches the real downstream credential from the user's vault, forwards the call, and returns the result. The agent sees tool results, never tool credentials.
+
+```
+  Worker agent ──(SVID + MCP request)──▶ mcp-auth-proxy ──(real credential injected)──▶ MCP server
+   · no downstream secret                · USER-controlled boundary        · downstream tool
+   · presents short-lived SVID           · trusts Metatron via SPIFFE federation
+   · sees results, never tokens          · checks scopes; polls revocation list
+                                         · emits a telemetry event on the causal chain (07)
+```
+
+- **Authorization policy is DERIVED FROM THE CONFIGURATION LAYER.** Which **role** may reach which **MCP server** with which **scopes** is a function of the governed config layer (`AgentRecord.role` → allowed `Scope`s). Therefore **granting privilege is a consensus-approved state diff** — there is no out-of-band ACL to edit; widening what an agent may touch is a typed proposal through the same propose→vote→commit gate (§3.4-style governance) and is permanently auditable.
+- **Coarse scopes ride in the SVID; fine revocation is polled.** The SVID carries **coarse** `Scope`s (good for minutes). For *fast* changes that must beat SVID expiry, the proxy **polls a fast revocation list** — the `Quarantined` / `EmergencyRevocation` entries (§3.1, §3.6) — and refuses any agent on it immediately, without waiting for the short SVID to lapse.
+- **Every brokered call is a telemetry event on the causal chain (`07`).** Each proxied MCP call emits an observability event onto the causal chain, so external tool use is first-class, attributable to an `AgentId`, and visible to Sentinels.
+
+**Privilege-separation principle (the core security gain).** An agent's **only long-term secret is its identity key** (§3.1). Everything else it needs — a workload SVID, a downstream tool call — is either short-lived (the SVID) or never in its possession (the downstream credential). Consequently **compromising an agent never compromises standing secrets**: the attacker gets, at most, that agent's *live, scoped* ability to ask the proxy to make calls during a minutes-long window, bounded by the config-derived scopes and killable instantly via the revocation list — and gets *no* reusable downstream token, no vault access, and (because the identity key is decoupled, §3.1) not even a permanent foothold once the key is rotated or revoked.
+
+### 3.9 External-user authentication & authorization (multi-user)
+
+`06-interaction` defers *who the external user is and how they authenticate* to this spec. The resolved model:
+
+- **Users are a SEPARATE PRINCIPAL TYPE — not `AgentId`s.** A user is not an agent: it does not vote, propose, sign commits, or hold a place in the configuration layer's reputation math. It is its own principal type, authenticated at the **API boundary (`06`)**, distinct from the agent-identity machinery of §3.1.
+- **Metatron is now MULTI-USER.** Multiple users are **first-class, concurrent** principals; the system is no longer single-tenant. (Concurrency/isolation of their goals interacts with `06`.)
+- **Per-user authorization scopes.** Each user carries authorization scopes over **which goals/budgets they may set** — a user can drive the system only within the goals and resource budgets their scope grants.
+- **Authenticated before a Guardian acts.** A user instruction is **authenticated** (and authorized against the user's scopes) **before any Guardian acts on it** — a Guardian normalizes only instructions that carry a verified user principal.
+- **Injection mitigations (T2) apply to *all* user input.** Authentication establishes *who* is speaking; it does **not** make the *content* trusted. Prompt-injection scrubbing and the typed-`Proposal`/council-verification gate (T2, §3.5) apply to every user instruction regardless of how well-authenticated its sender.
+
+```rust
+/// A SEPARATE principal type from AgentId; authenticated at the 06 API boundary.
+struct UserPrincipal {
+    user: UserId,                 // NOT an AgentId; distinct namespace
+    scopes: Vec<UserScope>,       // which goals / budgets this user may set
+    authn: UserAuthn,             // 06-owned: token / OIDC / session (mechanism in 06)
+}
+struct UserScope { goals: GoalPattern, budget: BudgetCeiling }
+```
+
+The detailed per-user scope *model* (and its interaction with `06`'s multi-user concurrency) remains open (§5).
 
 ---
 
@@ -344,36 +502,53 @@ Properties we *do* fix: the genesis commit has `parent == None` (consistent with
 Consolidated, normative *names and shapes* this spec contributes. Types from `00 §7` (`AgentId`, `Hash`, `Signature`, `Reputation`, `Commit`, `Vote`, `Proposal`, `Decision`) are referenced verbatim, not redefined.
 
 ```rust
-// ── Identity ───────────────────────────────────────────────────────────────
-struct PublicKey([u8; 32]);
+// ── Identity (stable AgentId, rotatable operational key) ─────────────────────
+struct PublicKey(/* scheme-tagged verifying material */);
 struct SecretKey(/* opaque, zeroized on drop; never serialized */);
-fn agent_id(pk: &PublicKey) -> AgentId;                 // = blake3(DOMAIN_AGENT_ID, pk)
+fn agent_id(identity_pk: &PublicKey) -> AgentId;        // = blake3(DOMAIN_AGENT_ID, scheme-tagged identity key)
 
 struct IdentityChallenge { nonce: [u8; 32], expires: LogicalTime }
 struct IdentityProof     { agent: AgentId, sig: Signature }
 
-// ── Signing ────────────────────────────────────────────────────────────────
-struct Signature { scheme: SigScheme, bytes: [u8; 64] }  // structure for 00's opaque Signature
-enum   SigScheme { Ed25519 /* agile; PQ candidates parked */ }
-fn sign  <T: Canonical>(sk: &SecretKey, domain: &[u8], a: &T) -> Signature;
-fn verify<T: Canonical>(pk: &PublicKey, domain: &[u8], a: &T, s: &Signature) -> bool;
-
-// ── Quorum / threshold ───────────────────────────────────────────────────────
-struct QuorumCertificate {
-    decision: Hash,
-    signers:  Vec<(AgentId, Signature)>,
-    threshold_class: ThresholdClass,
+/// Emergency revocation of a compromised OPERATIONAL key (identity is stable, §3.1).
+struct EmergencyRevocation {
+    agent: AgentId, revoked_key: PublicKey, expires: LogicalTime,
+    quorum: QuorumCertificate, evidence: Hash,
 }
-enum ThresholdClass { Ordinary /* 2/3 */, Constitutional /* 3/4 */ }
-fn quorum_valid(qc: &QuorumCertificate, set: &GenesisSet, w: &ReputationMap) -> bool;
+
+// ── Signing (hybrid composite PQ by default) ─────────────────────────────────
+struct Signature { scheme: SigScheme, bytes: Vec<u8> }   // structure for 00's opaque Signature
+enum   SigScheme { Ed25519, MlDsa, Hybrid(Box<SigScheme>, Box<SigScheme>) } // default Hybrid(Ed25519, MlDsa)
+enum   KemScheme { X25519, MlKem, Hybrid(Box<KemScheme>, Box<KemScheme>) }  // transport/wrapping; default Hybrid
+fn sign  <T: Canonical>(sk: &SecretKey, domain: &[u8], a: &T) -> Signature;
+fn verify<T: Canonical>(pk: &PublicKey, domain: &[u8], a: &T, s: &Signature) -> bool; // Hybrid iff BOTH verify
+
+// ── Quorum / threshold (explicit signer set kept in v1, §3.2) ────────────────
+struct QuorumCertificate { signers: Vec<AgentId>, sigs: Vec<Signature>, scheme: SigScheme }
+enum ThresholdClass { Ordinary /* 2/3 */, Constitutional /* 3/4 */ } // derived from the change, not stored
+fn quorum_valid(qc: &QuorumCertificate, class: ThresholdClass, set: &GenesisSet, w: &ReputationMap) -> bool;
 
 // ── Role / authorization (lives in 01's configuration layer) ─────────────────
 struct AgentRecord {
-    id: AgentId, public_key: PublicKey, role: Role, class: AgentClass,
-    capabilities: CapabilitySet, reputation: Reputation, status: AgentStatus,
+    id: AgentId, identity_key: PublicKey, operational_key: PublicKey,
+    role: Role, class: AgentClass, capabilities: CapabilitySet,
+    reputation: Reputation, provenance: Provenance, status: AgentStatus,
 }
+struct Provenance { spawn_decision: Hash, spawned_by: AgentId, spawned_at: LogicalTime }
 enum Role { Guardian, Genesis, Worker, Compiler, Sentinel }
 enum AgentStatus { Active, Quarantined, Removed }
+
+// ── Workload identity to external tools / MCP (§3.8; full proxy in 09) ────────
+struct Svid {
+    spiffe_id: SpiffeId, agent_id: AgentId, operational_key: PublicKey,
+    scopes: Vec<Scope>, not_after: LogicalTime, issuer_chain: CertChain, issuer_sig: Signature,
+}
+struct Scope { resource: McpServerId, methods: Vec<MethodPattern> }
+// SVID name: spiffe://metatron.<deployment>/agent/<AgentId>/role/<role>  (short-lived, auto-rotated)
+
+// ── External users (SEPARATE principal type; multi-user; authn at 06) ─────────
+struct UserPrincipal { user: UserId, scopes: Vec<UserScope>, authn: UserAuthn }
+struct UserScope { goals: GoalPattern, budget: BudgetCeiling }
 
 // ── Capabilities / sandboxing (enforced by 04's ExecutionBackend) ────────────
 struct Capability   { resource: Resource, mode: Mode, ttl: LogicalTime }
@@ -383,10 +558,12 @@ enum   Resource { Fs(PathScope), Net(HostScope), Exec(CmdScope),
 enum   Mode { ReadOnly, ReadWrite, Invoke }
 fn capabilities_for(role: Role, goal: &SubGoal) -> CapabilitySet;
 
-// ── Bootstrap ────────────────────────────────────────────────────────────────
+// ── Bootstrap (genesis root = m-of-n threshold of founders, §3.7) ────────────
 struct GenesisCeremony {
     initial_config: WorldModel,
-    operator_attestations: Vec<Signature>,
+    founder_attestations: Vec<Signature>,  // m-of-n threshold; offline threshold-split root CA
+    threshold: (u8, u8),                   // (m, n)
+    issuer_ca: CertChain,                  // online SPIRE intermediate issuer, chained to the offline root
     transcript: Hash,
 }
 ```
@@ -400,29 +577,27 @@ Trust boundaries from §2.1; each row is **vector → impact → mitigation**. T
 | **T1** | **Off-protocol / out-of-character agent** *(the core probabilistic-Byzantine case)* | An LLM-backed agent drifts or defects, casting bad votes / authoring bad proposals / producing bad work. | Wrong state updates; corrupted progress; a confident-but-wrong council. | **Detect** via Sentinels (`07`); **price** via reputation down-weighting so influence already degraded before action (§3.3, `02`); **decorrelate** via blind voting + heterogeneous harnesses so errors don't correlate (`02`,`04`); **quarantine/remove** via consensus (§3.6). Graceful degradation, not a tolerance cliff. |
 | **T2** | **Prompt injection — via user instruction** | Malicious text in a user instruction tries to hijack a Guardian into authoring an attacker's proposal. | Attacker-controlled proposal enters the loop under a legitimate Guardian's id. | Guardian output is a *typed* `Proposal`, not free text (`00 §6.1`); it is still **verified deterministically and voted** by Genesis before commit (`02`) — injection cannot bypass the council. Injection-scrubbing at the user boundary (`06`). The Guardian cannot itself commit anything (§3.5 capability table). |
 | **T3** | **Prompt injection — via content a harness reads** | Poisoned web page / repo file / tool output instructs the Worker's harness to exfiltrate, escalate, or emit adversarial results. | Harness does attacker's bidding within its sandbox; adversarial `HarnessResult`. | **Least-privilege capability scope** bounds blast radius — no ambient `Fs`/`Net`/`Exec`, egress allow-list (§3.5, `04`); output is **untrusted until verified** and must pass typed + deterministic verification before entering state (§3.5, `02`); scrub untrusted content before any LLM reads it. |
-| **T4** | **Compromised / malicious harness** | A third-party harness binary (or a supply-chain-compromised one) emits adversarial output or attempts to escalate. | Adversarial results; attempted sandbox escape; attempted state corruption. | Harness is **never trusted** (§2.1): runs sandboxed (seccomp/namespaces or pod policy, §3.5), cannot self-elevate, holds no signing key, and its output enters state only through the typed/verified/voted/signed gate. Decorrelation: a single bad harness cannot swing a heterogeneous council. |
+| **T4** | **Compromised / malicious harness, or stolen agent** | A third-party harness binary (or a supply-chain-compromised one) emits adversarial output, attempts to escalate, or an attacker fully captures a running agent. | Adversarial results; attempted sandbox escape; attempted state corruption; attempted theft of downstream tool credentials. | Harness is **never trusted** (§2.1): runs sandboxed (seccomp/namespaces or pod policy, §3.5), cannot self-elevate, and its output enters state only through the typed/verified/voted/signed gate. **Gateway-only brokering (§3.8) bounds a stolen agent:** it holds **no standing downstream secret** (no token to exfiltrate), so the blast radius is only its *live, config-derived scopes* during a **minutes-long SVID window**, killable instantly via the revocation list. Decorrelation: a single bad harness cannot swing a heterogeneous council. |
 | **T5** | **Replay** in voting/commits | An old, validly-signed `Vote` or commit witness is re-submitted to count again or revert state. | Stale judgment counted twice; rollback to a superseded state. | Signatures bind to the **proposal hash** and (for commits) to **`parent` + `state_root` + `timestamp`** (§3.2); a vote is valid only for its specific proposal/round; commits chain by `parent` so a replayed witness doesn't match the current head (`01`). Challenge nonces are single-use (§3.1). |
 | **T6** | **Equivocation** in voting | A Genesis agent casts *conflicting* votes (e.g. Approve to some peers, Reject to others) to split or double-count. | Inconsistent tallies; potential double-weight; council manipulation. | One signed `Vote` per (voter, proposal, round); `quorum_valid` rejects duplicate `AgentId`s in a certificate (§3.2). Equivocation is *cryptographic proof of misbehavior* — two conflicting signed votes are non-repudiable evidence → reputation slash + quarantine (§3.6, `02`). Blind voting also removes the incentive (no peers to play off pre-vote). |
 | **T7** | **Illegitimate kernel change** | An attempt to add/remove/re-role a Genesis or Guardian without legitimate authority (e.g. add sock-puppet voters). | Capture of the trust root → ability to validate arbitrary commits. | **Constitutional ¾** threshold + constitutional `QuorumCertificate` evaluated **against the prior electorate** (no self-dealing the quorum) (§3.4); change lands as an attributable, chained, signed `Commit` in the Merkle DAG → **auditable and irreversible-to-hide** (§3.4, `01`). No privileged bypass path exists. |
-| **T8** | **Key compromise / impersonation** | An agent's `SecretKey` leaks; attacker signs as that `AgentId`. | Actions forged under a real identity. | Secret keys isolated in the agent boundary, never in harness/telemetry (§3.5); blast radius bounded by that agent's role capabilities (a leaked Worker key ≠ kernel power, §3.1); kernel keys under strongest custody. **Rotation/revocation parked** (§5). |
-| **T9** | **Sybil amplification** | Spawn many identities to dilute reputation weighting or swamp a vote. | Manufactured influence; weighting math gamed. | Spawning is a consensus-gated typed diff (`00 §3`); new agents earn reputation **fresh from a floor**, so identities carry *no* immediate weight (§3.3); weighting is by reputation, not headcount. **Stronger Sybil resistance for dynamic spawns parked** (§5). |
+| **T8** | **Key compromise / impersonation** | An agent's operational `SecretKey` leaks; attacker signs as that `AgentId`. | Actions forged under a real identity. | Secret keys isolated in the agent boundary, never in harness/telemetry (§3.5); blast radius bounded by that agent's role capabilities (a leaked Worker key ≠ kernel power, §3.1); kernel keys under the threshold-split root (§3.7). **Resolved:** `AgentId` is decoupled from the operational key, so rotation is a **governed config-layer diff** (reputation carried per class-prior, §3.1/§3.3.1) and a leak triggers a **time-boxed, audited fast-path quorum revocation** (`EmergencyRevocation`, §3.1) that the MCP proxy honors via the polled revocation list (§3.8). |
+| **T9** | **Sybil amplification** | Spawn many identities to dilute reputation weighting or swamp a vote. | Manufactured influence; weighting math gamed. | **Resolved (§3.6):** spawning is **consensus-gated** + **per-spawn rate-limited**; new agents inherit only a **discounted, decaying class-prior floor** (§3.3.1), so identities carry little immediate weight; each identity is **bound to its spawning Decision** (`provenance`); and the **workload attestor (§3.8) refuses an SVID** to any agent not in the current config layer. Weighting is by reputation, not headcount. Staking deferred. |
 | **T10** | **Reputation gaming** | Ballot-stuffing easy wins, sleeper long-con, or collusion to inflate reputation. | Inflated influence; a high-rep agent defects on a high-stakes vote. | Reputation updates against **ground truth**, not peer approval; difficulty-weighted gains; determinism-first denies credit for trivially-checkable proposals; Sentinels flag correlated blocs; high-stakes (kernel) votes need ¾ no single defector can reach (§3.3, `02`). |
+| **T11** | **MCP-proxy compromise / federation-trust compromise** | The `mcp-auth-proxy` is breached (downstream vault exposed), or its SPIFFE federation trust bundle is corrupted so it accepts SVIDs not minted by Metatron. | Downstream tool credentials leaked; forged SVIDs accepted → unauthorized brokered calls under a fake agent identity. | **Trust separation contains the blast radius:** the proxy is a **user-controlled** boundary holding the secrets, while Metatron core holds **none** — a Metatron-core compromise yields no downstream credential (§3.8). The proxy verifies every SVID against **Metatron's federated issuer trust bundle** (chained to the threshold-split root, §3.7), so accepting forged SVIDs requires corrupting that bundle or the issuer key — both audited, rotatable under the offline root, and themselves revocable. Every brokered call is a **telemetry event on the causal chain (`07`)**, so anomalous proxy behavior is observable to Sentinels; coarse scopes are minutes-short and gated by the polled revocation list. *Operational hardening of the proxy is owned by `09`.* |
+| **T12** | **External-user impersonation / over-reach** | An attacker spoofs a user principal at the `06` API boundary, or a legitimate user attempts goals/budgets beyond their grant. | Unauthorized goals/budgets injected; cross-user interference in the multi-user system. | Users are a **separate principal type** authenticated at the `06` boundary and **authorized against per-user scopes** *before any Guardian acts* (§3.9); instructions still pass injection-scrub + the typed-`Proposal`/council-verify gate (T2), so authentication never makes *content* trusted. Per-user scope-model specifics interact with `06` (§5). |
 
 ---
 
 ## 5. Open questions & ambiguities
 
-Parked per `00 §9`. These are genuine, deferred decisions — not yet settled.
+Parked per `00 §9`. The design review **resolved** the bulk of this section into the normative design above (key rotation/revocation → §3.1; who signs genesis → threshold of founders, §3.7; Sybil resistance → §3.6; reputation acquisition → class-prior-with-decay, §3.3.1; external-user auth → separate principal, §3.9; signature aggregation → explicit set in v1, §3.2; crypto-agility/PQ → hybrid composite now, §3.2; quarantine reversibility/anti-weaponization → §3.6). What **genuinely remains open**:
 
-1. **Key rotation & revocation.** How does an agent rotate its `SecretKey` (hence `AgentId`, since the id *is* the key hash)? A new key implies a new id and a config-layer diff re-binding role and *carrying over reputation* — but reputation transfer is itself contested (item 4). Revoking a compromised key needs a fast path that doesn't wait on a full ordinary-consensus cycle, yet a fast path is itself an attack surface. Open: rotation protocol, emergency revocation authority, and whether `AgentId` should be decoupled from the raw key (e.g. a stable id with a rotatable key reference) to make rotation cheaper.
-2. **Bootstrapping the trust root (who signs genesis).** §3.7 isolates the ceremony but does not decide *who* is authorized to sign the `parent == None` commit, nor how the founding seed keys are custodied (single operator? threshold of founders? external attestation / transparency log?). This is the one trust assertion the whole system rests on; it needs a deliberate policy, not a default.
-3. **Sybil resistance for dynamically spawned agents.** §3.3/T9 lean on "consensus-gates spawning" + "fresh reputation floor," but a determined adversary controlling proposal flow could still manufacture many low-rep identities to apply slow pressure or pollute telemetry. Open: per-spawn cost/staking, spawn-rate limits, identity-provenance requirements, or binding spawned-agent identity to the spawning decision.
-4. **Reputation: transferable or earned-fresh?** Must every new agent (or rotated key, item 1) earn reputation from the floor, or can reputation be inherited from a class/template/predecessor? Earned-fresh is safer (no laundering of trust) but punishes legitimate rotation and re-spawning of known-good classes. Transferable is ergonomic but is itself a gaming vector (sell/lease a high-rep identity). Likely a constrained middle (class priors with decay) — undecided.
-5. **External user authentication (deferred here from `06`).** `06-interaction` defers *who the external user is and how they authenticate* to this spec. Open: how user identity is established (and whether users get `AgentId`-like identities or a separate principal type), how user instructions are authenticated/authorized before a Guardian acts on them, and how that ties to the injection mitigations (T2). Unresolved: per-user authorization scopes over which goals/budgets a user may set.
-6. **Signature aggregation cryptosystem.** Whether to keep the explicit signature *set* (`QuorumCertificate.signers`) or move to a true threshold/aggregate scheme (BLS, FROST) for compact, one-shot quorum verification. Trade-off: aggregates are smaller and faster to verify but obscure *which* members signed (harming reputation accounting and equivocation detection) and add cryptographic complexity. `QuorumCertificate` is the stable interface either way.
-7. **Crypto-agility & post-quantum.** `SigScheme` is left agile (Ed25519 default). When/whether to add a PQ scheme (ML-DSA) and how to migrate `AgentId`s (which are key hashes) across a scheme change without breaking historical commit verification is open.
-8. **Kernel key custody.** §3.1 asserts kernel keys deserve "strongest available custody" but does not pick a mechanism (HSM, sealed/enclave, threshold-split among operators). Interacts with items 1, 2.
-9. **Quarantine adjudication & reinstatement.** §3.6 defines `Quarantined` as reversible, but the *process* — who investigates, on what evidence, how reinstatement is decided, and how to prevent quarantine itself from being weaponized against an honest minority — is unspecified.
+1. **Reputation class-prior decay parameters (empirical).** The *shape* is settled — class-prior with decay (§3.3.1) — but the **prior magnitude and decay schedule** (how discounted the inherited prior is, how fast it bleeds to earned reputation, per role/class) are empirical and must be tuned against measured agent behavior.
+2. **Genesis ceremony operational details.** *Who* signs genesis is settled (m-of-n threshold of founders, §3.7). What remains is the **concrete custody mechanism for the founder shares** — HSM vs. enclave vs. the specifics of the threshold-split — and the ceremony runbook for assembling/retiring shares.
+3. **PQ migration timeline & SVID re-issuance.** The default is hybrid composite *now* (§3.2). Open: the **migration timeline** for advancing the default scheme, and how **SVIDs are re-issued across a scheme change** (re-attestation, dual-scheme overlap windows) without breaking historical commit verification or live workload identity.
+4. **Quarantine adjudication process specifics.** Quarantine is reversible, evidence-driven, and dual-set protected (§3.6). Still unspecified: the **process detail** — who investigates, the evidentiary standard, timelines, and the precise reinstatement workflow.
+5. **Per-user authorization scope model (multi-user).** Users are a separate principal type with per-user scopes (§3.9). Open: the **detailed scope model** — how goal/budget scopes are expressed, delegated, and enforced — and how it **interacts with `06`'s multi-user concurrency** (isolation between concurrent users' goals, fairness, cross-user visibility).
 
 ---
 
@@ -434,5 +609,6 @@ Parked per `00 §9`. These are genuine, deferred decisions — not yet settled.
 - **`03-control-loop`** — Owns the PID controller and `ErrorVector`. Security signals feed it: dispersion/equivocation/anomaly raise the **divergence** dimension; capability/budget exhaustion feeds **cost** and **latency** (§3.5).
 - **`04-runtime-and-harness`** — Owns `AgentHarness`/`ExecutionBackend`. This spec defines the **permission model** (`CapabilitySet`, role-derived least privilege) those backends *enforce* at the sandboxing hooks `04` references, and the requirement that `HarnessResult` is untrusted-until-verified (§3.5).
 - **`05-agent-jit`** — Tier-1/2 compiled policies still act under the *same* identity, capabilities, and verification gate as the Tier-0 interpreter; a deopt (trap) does not relax sandboxing. Compiler agents propose installs but cannot self-grant capabilities (§3.5).
-- **`06-interaction-and-mailbox`** — Owns user intake and the mailbox; **defers external-user authentication to this spec** (§5, item 5). This spec owns injection mitigations at the user boundary (T2) and the rule that Guardian output is typed + council-verified, never directly committed.
-- **`07-observability`** — Owns telemetry and Sentinels. Sentinels are the **detection** half of the Byzantine response (§3.6): their off-protocol/drift/equivocation/correlated-bloc findings feed reputation (`02`) and the PID divergence signal (`03`). Observability is read-only by capability (§3.5 table) so the watchers cannot mutate what they watch.
+- **`06-interaction-and-mailbox`** — Owns user intake and the mailbox. External users are a **separate principal type** authenticated at `06`'s API boundary; this spec defines that principal model and its per-user authorization scopes (§3.9), the **multi-user** stance, the injection mitigations at the user boundary (T2), and the rule that Guardian output is typed + council-verified, never directly committed. The detailed scope model and multi-user concurrency are co-owned with `06` (§5).
+- **`07-observability`** — Owns telemetry and Sentinels. Sentinels are the **detection** half of the Byzantine response (§3.6): their off-protocol/drift/equivocation/correlated-bloc findings feed reputation (`02`) and the PID divergence signal (`03`). Observability is read-only by capability (§3.5 table) so the watchers cannot mutate what they watch. Every **brokered MCP call** (§3.8) emits a telemetry event onto the causal chain, making external tool use first-class and Sentinel-visible.
+- **`09-mcp-auth-proxy`** — Owns the full design of the `mcp-auth-proxy`. This spec supplies the **trust/identity view**: the SPIFFE/SPIRE + Metatron-workload-attestor identity model, the `Svid`/`Scope` shapes, SVID naming and lifetime, gateway-only brokering, config-layer-derived authorization, SPIFFE federation as the proxy↔core trust link, and the privilege-separation principle that an agent's only long-term secret is its identity key (§3.8). `09` owns the proxy's deployment, vault integration, and operational hardening.
