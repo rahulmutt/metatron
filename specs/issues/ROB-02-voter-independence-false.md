@@ -3,7 +3,7 @@ id: ROB-02
 title: Tolerance claim rests on voter independence admitted false elsewhere
 severity: high
 category: robustness
-status: open
+status: resolved
 affected_specs: [08-trust-and-security.md, 02-consensus.md, README.md]
 review_verdict: CONFIRMED
 ---
@@ -42,3 +42,20 @@ conditional on an unmet assumption, the system's safety posture is overstated.
 - [ ] 08 no longer claims a tolerance bound that assumes independence without caveat.
 - [ ] Decorrelation is specified as a measured precondition for quorum validity.
 - [ ] Related: ROB-01 (confident collective error is the symptom of this).
+
+## Resolution
+
+Demote the tolerance claim to "mitigated; correlated failure is the headline residual
+risk." Mandate measured base-model / harness diversity as an operational precondition
+before any quorum is treated as independent, and cross-link the correlation-aware
+aggregation open question into 02 and 08 rather than leaving it only in the README.
+
+Rationale: both the "graceful degradation" claim and the Condorcet appeal require voter
+independence, which the README itself flags as unsolved and which reputation cannot
+rescue for a novel correlated failure. An honest residual-risk framing plus a measured
+decorrelation precondition stops the headline safety property from resting on an unmet
+assumption.
+
+Coverage: satisfies both checks — 08 no longer asserts an independence-bound tolerance
+without caveat, and decorrelation becomes a measured precondition for quorum validity.
+The ROB-01 link (the symptom of this gap) is carried in ROB-01.

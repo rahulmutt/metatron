@@ -8,26 +8,47 @@
 
 ## 1. Vision
 
+> **The core idea — hold this first; everything below is implementation framing.**
+> Metatron is a **deliberative governor wrapped around a reconciliation loop.** Changes
+> to the system are **authored by one set of agents (Guardians) and decided by a separate
+> council (Genesis)** — *propose ≠ dispose* — and **anything machine-checkable is verified
+> deterministically before anyone votes** — *verify-before-vote*. That small mechanism is
+> the whole load-bearing idea. The domain analogies that follow (Kubernetes reconciliation,
+> control-theoretic steering, an optimizing JIT, a Condorcet jury, a Merkle/identity layer)
+> are *implementation framings* layered on this core — each is **skippable on first read**.
+> The table at the end of this section states how much of each analogy is actually
+> load-bearing.
+
 Metatron is a **principled, extensible orchestration platform for multi-agent systems**. It descends from systems like Gas Town (Steve Yegge), Agent Hub (Andrej Karpathy), and Symphony (OpenAI), but it makes three commitments those systems do not:
 
 1. **Govern, don't dictate.** Instead of a single "Mayor," Metatron is governed by a *council* of **Genesis** agents that reach **consensus** over how the system should evolve. The multi-agent structure itself is an outcome of deliberation, recorded immutably.
 2. **Treat agents as an unreliable substrate, and engineer around it.** LLM-backed agents drift, hallucinate, and go off-protocol. Metatron treats a multi-agent system as **probabilistically Byzantine** and applies an explicit protocol — constrain, verify, decorrelate, weight, deliberate — to *tame that nondeterminism* rather than wish it away.
-3. **Close the loop with control theory.** An external user sets a target. Metatron runs a **multi-variable PID controller** over a measured error vector (progress, cost, divergence, latency, …) to steer the system toward that target, the way a control system steers a plant toward a setpoint.
+3. **Close the loop; steer on measured error.** An external user sets a target. Metatron **steers** the system toward that target on a **measured error vector** (progress, cost, divergence, latency, …) — a per-dimension *proportional* response gated by deadband/hysteresis/cooldown, never on hope. (The full PID apparatus — integral/derivative terms, anti-windup, Ziegler–Nichols tuning, a MIMO gain matrix — is *framing*, **deferred until a measured oscillation demands it**; see `03` and issue OE-01.)
 
 Two further commitments make it *extensible like Kubernetes*:
 
 - **Abstract over execution.** An agent is a *role + goal + policy* bound to an **`AgentHarness`** (Claude Code, Codex, Cursor, Aider, …). Metatron orchestrates *above* harnesses; it does not re-implement one. Execution itself runs behind an **`ExecutionBackend`** trait with two reference implementations: in-process Rust actors, and Kubernetes CRDs.
 - **Abstract over the storage of system evolution.** Every change to the system is a signed, content-addressed commit in a **Merkle DAG**, giving a verifiable, replayable history of how the system became what it is.
 
-And one commitment that ties it all together — **the JIT principle**: any agent whose behavior has stabilized can be **compiled** from a live LLM loop (the "interpreter") into faster, cheaper deterministic code, guarded by **traps** that **deoptimize** back to the LLM when an assumption breaks.
+And one commitment that ties it all together — **the JIT principle**: any agent whose behavior has stabilized earns cheaper execution — from a live LLM loop (the "interpreter", Tier-0) to a **memoized** input→action policy guarded by **traps** that **deoptimize** back to the LLM when an assumption breaks (Tier-1). (Tier-2 — *generalizing* a stabilized policy into freshly **synthesized** deterministic code — is **deferred** until its equivalence metric exists and Tier-1 is shown insufficient; see `05` and issue OE-03.)
 
 The core system is implemented in **Rust**.
+
+**How much of each analogy is load-bearing.** The framings above are pedagogically useful but unequally earned. Read this before taking any one metaphor literally:
+
+| Analogy | Load-bearing? | What actually ships |
+|---------|---------------|---------------------|
+| **Kubernetes reconciliation** | **Yes** | The execution loop genuinely reconciles reality toward committed desired-state. |
+| **Control theory / PID** | **Mostly framing** | Load-bearing part is "steer on measured error": a *proportional* response + deadband/hysteresis/cooldown. Full PID (I/D, anti-windup, Ziegler–Nichols, `Γ`) is deferred (OE-01). |
+| **Optimizing JIT** | **Yes at the mechanism level** | Interpreter/guard/deopt for Tier-0 + Tier-1. Tier-2 code synthesis is deferred (OE-03). |
+| **Condorcet / BFT jury** | **Partly — assumption-conditional** | Decorrelation + weighting are real, but voter independence is only approximate; **correlated failure is the headline residual risk** (ROB-02). |
+| **Merkle DAG / distributed identity** | **Framing for storage & identity** | The content-addressed signed log is load-bearing; the *bespoke* DAG store is replaced by an off-the-shelf content-addressed store (OE-04), and the SPIFFE/SPIRE PKI ceremony is gated behind multi-cluster (OE-06). |
 
 ---
 
 ## 2. The Five Planes
 
-Metatron separates concerns into five planes, echoing the Kubernetes control-plane/data-plane split.
+Metatron separates *concerns* into five planes, echoing the Kubernetes control-plane/data-plane split. "Separation" here means each plane owns a distinct **concern and its logic** — it does **not** mean the planes own fully disjoint *state*. The central `AgentNode` object is a deliberately **shared aggregate** carrying fields touched by every plane (grouped by owning plane); this one intentional exception is documented in `01-state-model.md` §2.1. Treat the planes as a decomposition by concern, not as disjoint data silos.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -36,7 +57,7 @@ Metatron separates concerns into five planes, echoing the Kubernetes control-pla
 │                      (Guardian agents)                        │
 ├─────────────────────────────────────────────────────────────┤
 │  GOVERNANCE PLANE    Genesis council · consensus protocol ·   │
-│                      typed proposals · PID controller         │
+│                      typed proposals · steering loop          │
 ├─────────────────────────────────────────────────────────────┤
 │  STATE PLANE         layered world-model · Merkle DAG ·        │
 │                      content-addressed signed commits         │
@@ -53,7 +74,7 @@ Metatron separates concerns into five planes, echoing the Kubernetes control-pla
 | Plane | Owns | Primary spec |
 |-------|------|--------------|
 | Interaction | User intake, goal normalization, ambiguity, mailbox | `06-interaction-and-mailbox.md` |
-| Governance | Proposals, consensus, the PID controller | `02-consensus.md`, `03-control-loop.md` |
+| Governance | Proposals, consensus, the steering loop | `02-consensus.md`, `03-control-loop.md` |
 | State | The world-model, the Merkle history | `01-state-model.md` |
 | Execution | Harness orchestration, backends, JIT | `04-runtime-and-harness.md`, `05-agent-jit.md` |
 | Observability | Telemetry that taps every plane | `07-observability.md` |
@@ -72,9 +93,11 @@ Five roles, designed as a **separation of powers** (proposer ≠ voter, so no ag
 | **Genesis** | *Dispose* | The governance council. Deliberate + vote on proposals via the consensus protocol; reach consensus over state updates. Does **not** author proposals — only judges them. |
 | **Worker** | *Execute* | The task-doers; each is a role+goal bound to an `AgentHarness`. The bulk of the org-chart. Ephemeral; spawned/wired by consensus. |
 | **Compiler** | *Optimize* | Perform JIT tiering: observe stable Worker behavior, synthesize Tier-1/Tier-2 policies, install deopt guards. |
-| **Sentinel** | *Watch* | Detect off-protocol/out-of-character behavior, drift, and trap rates; feed reputation, the observability plane, and the PID divergence signal. |
+| **Sentinel** | *Watch* | Detect off-protocol/out-of-character behavior, drift, and trap rates; feed reputation, the observability plane, and the steering loop's divergence signal. A single Sentinel finding cannot, by itself, move reputation/vote weight — findings require k-of-n corroboration (ROB-06). |
 
-**Checks-and-balances cycle:** Guardians propose → Genesis disposes → Workers execute → Sentinels watch → Compilers optimize → measurements feed the PID controller → next proposal.
+**Planes and roles are different decompositions — not a 1:1 grid.** The five planes (§2) decompose the system by *concern*; the five roles decompose it by *power*. The matching count is coincidental, and the mapping is deliberately **not** one-to-one: the **State plane has no owning role** (it is maintained by consensus, not any single agent class), and the **Execution plane has two** (Worker *and* Compiler). Do not read the two five-item lists as parallel rows of one table.
+
+**Checks-and-balances cycle:** Guardians propose → Genesis disposes → Workers execute → Sentinels watch → Compilers optimize → measurements feed the steering loop → next proposal.
 
 **Kernel vs. dynamic roles.** Guardian and Genesis are the privileged **kernel** roles, established at bootstrap. Workers, Compilers, and Sentinels are instantiated dynamically under consensus. Changing kernel membership is a **constitutional amendment** with a higher consensus threshold (see §6).
 
@@ -89,7 +112,7 @@ The canonical **System State** is a **layered world-model** with two layers, ver
 - **Configuration layer** — the agent org-chart: which agents exist, their roles/classes, their wiring, their assigned sub-goals, and their JIT tier.
 - **Progress layer** — progress toward the user's goal: the task graph, artifacts produced, sub-goals resolved, open questions.
 
-A **state update** is a **typed diff** that touches one or both layers. Consensus and the PID controller operate on whichever layer a proposal touches. Full schema in `01-state-model.md`.
+A **state update** is a **typed diff** that touches one or both layers. Consensus and the steering loop operate on whichever layer a proposal touches. Full schema in `01-state-model.md`.
 
 ---
 
@@ -110,12 +133,21 @@ A **state update** is a **typed diff** that touches one or both layers. Consensu
         │                                  │                        │
         │                          Observability: measure           │
         │                                  │                        │
-        │                          PID controller: error vector     │
+        │                          Steering loop: error vector      │
         │                                  │                        │
         └──────────────────────────────────┘  control actions ──▶ (next proposal)
 ```
 
-The loop is **Kubernetes-style reconciliation** wrapped in a **deliberative, control-theoretic governor**: the council sets desired state by consensus; the execution plane drives actual state toward it; observability measures the gap; the PID controller turns the measured error vector into control actions that become the next proposals. When ambiguity blocks progress, Guardians surface a question to the user via the mailbox and **the affected work blocks until answered**.
+The system has **two nested loops** (kept terminologically distinct — see Glossary):
+
+- the **execution / reconciliation loop** — the execution plane drives *actual* state toward the *committed* desired state (Kubernetes-style); it owns convergence of **reality → committed desired-state**;
+- the **steering loop** — the deliberative governor moves *desired* state by authoring proposals the council accepts; it is nested *around* the reconciliation loop and owns convergence of **desired-state → user target**.
+
+So: the council sets desired state by consensus; reconciliation drives actual state toward it; observability measures the gap; the steering loop turns the measured error vector into control actions that become the next proposals.
+
+**Not every advance pays for full consensus.** Consensus cost is tiered by **blast radius** (see `02`): routine, reversible advances — worker spawns, progress-layer updates — proceed under a **single Guardian with post-hoc audit** and optimistic concurrency on the head, while a full blind-vote council round is **reserved for high-blast-radius, irreversible, or constitutional** proposals.
+
+When ambiguity or a high-stakes gate blocks progress, Guardians surface a question to the user via the mailbox; the affected work **waits under a bounded escalation timeout and then degrades safely** (it never silently proceeds on an irreversible action — see `06`), rather than blocking indefinitely.
 
 ---
 
@@ -125,7 +157,7 @@ These principles recur throughout the specs. They exist to **tame the nondetermi
 
 1. **Constrain the output space.** Agents act through *typed, schema-validated* artifacts (proposals, diffs), never free text into the system of record. You cannot be nondeterministic in a space you are not allowed to express.
 2. **Determinism-first.** Anything machine-checkable is *checked, not voted on*. LLM judgment is the fallback reserved for the genuinely subjective. (This is also the philosophical root of the JIT: collapse to determinism wherever you can.)
-3. **Decorrelate to tame nondeterminism.** Independent, diverse agents fail in independent ways; by the Condorcet jury theorem, aggregating independent better-than-random judgments drives error toward zero. Heterogeneous harnesses and blind (isolated-first) voting are the mechanisms. Premature discussion is an anti-pattern: it *correlates* errors.
+3. **Decorrelate to tame nondeterminism.** Independent, diverse agents fail in independent ways; by the Condorcet jury theorem, aggregating independent better-than-random judgments drives error toward zero. Heterogeneous harnesses and blind (isolated-first) voting are the mechanisms. Premature discussion is an anti-pattern: it *correlates* errors. **Caveat:** independence is only ever *approximate* — agents sharing a base model fail together — so this is a **mitigation, not a guarantee**. **Correlated, confidently-wrong agreement is the headline residual risk** (ROB-01/ROB-02); measured base-model/harness diversity is an *operational precondition* for treating a quorum as independent, not an assumption.
 4. **Weight by calibrated track record.** Reputation, updated against ground truth, lets chronically-drifting agents decay toward zero influence automatically.
 5. **Close the loop, measure the error.** Every decision feeds back. The system steers on a measured error vector, not on hope.
 6. **Record everything immutably.** System evolution is a verifiable, replayable Merkle history. Monitoring is first-class, not an afterthought.
@@ -184,13 +216,16 @@ struct Vote {
 struct Decision {
     proposal: Hash,
     posterior: f32,              // aggregated probability the proposal is correct
-    dispersion: f32,             // how split the council was -> feeds PID divergence
+    dispersion: f32,             // how split the council was -> feeds steering-loop divergence
     passed: bool,
     rounds: u32,                 // deliberation rounds used (0 if decided on blind vote)
     verification: VerificationReport,
 }
 
-/// The PID error signal: a vector, one component per controlled dimension.
+/// The steering-loop error signal: a vector, one component per controlled dimension.
+/// NOTE: `divergence` measures council *disagreement*, not *wrongness* — a correlated,
+/// confidently-wrong council reads as low divergence (ROB-01). See 03/07 for the
+/// verification-coverage companion signal that compensates.
 struct ErrorVector {
     progress: f32,               // distance to goal completion
     cost: f32,                   // budget pressure
@@ -238,6 +273,9 @@ struct QuorumCertificate { signers: Vec<AgentId>, sigs: Vec<Signature>, scheme: 
 /// SPIFFE Verifiable Identity Document — the short-lived (minutes), auto-rotating
 /// operational credential SPIRE issues after the Metatron workload attestor checks
 /// the agent against the current head (exists, holds key, above rep floor, not quarantined).
+/// NOTE: the SPIRE/attestor issuance path is the *multi-cluster* form. The single-node
+/// default issues a short-lived orchestrator-signed token over the same fields, with a
+/// polled revocation list; SPIRE is gated behind a multi-cluster trigger (OE-06, see 08).
 struct Svid {
     spiffe_id: SpiffeId,         // "spiffe://metatron.<deployment>/agent/<AgentId>/role/<role>"
     agent_id: AgentId,
@@ -282,12 +320,14 @@ trait McpAuthProxy {
 | **Blind vote** | A vote cast in isolation, before deliberation, to keep errors decorrelated. |
 | **Reputation** | A calibrated, decaying measure of an agent's track record against ground truth. |
 | **Posterior** | Aggregated probability a proposal is correct; acceptance is a threshold on it. |
-| **Dispersion** | How split a vote was; fed to the PID controller as the divergence dimension. |
-| **PID controller** | Multi-variable proportional-integral-derivative controller over the error vector. |
-| **Error vector** | The measured gap between desired and actual state, per controlled dimension. |
+| **Dispersion** | How split a vote was; fed to the steering loop as the divergence dimension. Measures *disagreement*, not *wrongness* (ROB-01). |
+| **Verification coverage** | Fraction of a decision that was machine-verifiable (vs. left to LLM judgment); a first-class control/health signal alongside dispersion (ROB-01; see `07`). |
+| **Steering loop** | The governance-level loop: the deliberative governor moves *desired* state by authoring proposals consensus accepts. Steers on a measured error vector (proportional + deadband/hysteresis/cooldown; full PID deferred — OE-01). Nested *around* the reconciliation loop; owns convergence of desired-state → user target. |
+| **Reconciliation loop** | The execution-level loop: the `ExecutionBackend` drives *actual* running state toward the *committed* desired state (Kubernetes-style). Owns convergence of reality → committed desired-state. "Reconciliation" refers only to this loop. |
+| **Error vector** | The measured gap between desired and actual state, per controlled dimension; the steering loop's input. |
 | **AgentHarness** | A wrapped agentic tool (Claude Code, Codex, …) Metatron drives as a black box. |
 | **ExecutionBackend** | Where agents run: Rust actors or Kubernetes CRDs. |
-| **Tier / JIT / Trap / Deopt** | Execution tier (0/1/2); compiling stable behavior; a guard; the fallback to a lower tier. |
+| **Tier / JIT / Trap / Deopt** | Execution tier (0 interpreter / 1 memoized / 2 synthesized); compiling stable behavior; a guard; the fallback to a lower tier. v1 ships Tier-0 + Tier-1; **Tier-2 is deferred** (OE-03). |
 | **Constitutional amendment** | A change to kernel-role membership; higher consensus threshold. |
 | **Mailbox** | The notification/question channel between the system and the user. |
 | **External user / `UserPrincipal`** | A human user of the system — a *separate* principal type from `AgentId`. The system is **multi-user**: concurrent users with per-user mailboxes and authorization scopes. |
@@ -308,7 +348,7 @@ trait McpAuthProxy {
    │       │
    │       ├── 02-consensus ...... defines Proposal, Vote, Decision (writes commits)
    │       │       │
-   │       │       └── 03-control-loop ... defines ErrorVector, PID (emits proposals)
+   │       │       └── 03-control-loop ... defines ErrorVector, steering loop (emits proposals)
    │       │
    │       └── 06-interaction .... Guardians author proposals; mailbox blocks on ambiguity
    │
@@ -316,7 +356,7 @@ trait McpAuthProxy {
    │       │
    │       └── 05-agent-jit ...... Tier 0/1/2, traps, Compiler + Sentinel
    │
-   ├── 07-observability .......... taps every plane; feeds Sentinels + PID estimators
+   ├── 07-observability .......... taps every plane; feeds Sentinels + steering-loop estimators
    │
    ├── 08-trust-and-security ..... identity, signing, reputation, sandboxing, Byzantine
    │       │                       response, agent identity & external-tool authorization

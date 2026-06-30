@@ -3,7 +3,7 @@ id: UX-04
 title: Many paths dead-end at "block until a human answers"
 severity: medium
 category: usability
-status: open
+status: resolved
 affected_specs: [02-consensus.md, 06-interaction-and-mailbox.md, 09-mcp-auth-proxy.md]
 review_verdict: SOFTENED
 ---
@@ -50,3 +50,19 @@ the existence of human gates.
 - [ ] Cross-user conflict has a deterministic precedence rule.
 - [ ] No path is specified as blocking "indefinitely" without a defined fallback.
 - [ ] Related: ROB-04 (council deadlock), ROB-07 (reversibility gate).
+
+## Resolution
+
+Adopt one uniform escalation-timeout policy across all human-block paths: a bounded wait
+that, on expiry, holds and degrades safely and never silently proceeds on irreversible
+actions. Add a deterministic cross-user precedence rule so two authorized users cannot
+mutually deadlock, and ensure no path is specified as blocking "indefinitely."
+
+Rationale: several independent paths gate availability on human latency with no defined
+fallback, and "indefinitely" contradicts the system's own tenet that humans are an
+unreliable oracle. A single bounded policy plus a tie-break rule fixes both the liveness
+and usability problems while preserving human gates for genuinely irreversible actions.
+
+Coverage: satisfies all three checks — one escalation-timeout policy covers every
+human-block path, cross-user conflict has a deterministic precedence rule, and no path
+blocks indefinitely without a defined fallback.

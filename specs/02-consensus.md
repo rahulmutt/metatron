@@ -21,7 +21,7 @@ The protocol is **not** a classical BFT agreement protocol (PBFT, Tendermint, Ho
 What this spec **does not** own:
 
 - The *shape* of a `TypedDiff` and the world-model it mutates → [`01-state-model.md`](./01-state-model.md).
-- Where the PID divergence signal *goes* once we emit `dispersion` → [`03-control-loop.md`](./03-control-loop.md).
+- Where the steering-loop divergence signal *goes* once we emit `dispersion` → [`03-control-loop.md`](./03-control-loop.md).
 - Who *authors* proposals and how ambiguity is escalated to the user → [`06-interaction-and-mailbox.md`](./06-interaction-and-mailbox.md).
 - Key material, the signing scheme, equivocation forensics, and the full threat model → [`08-trust-and-security.md`](./08-trust-and-security.md).
 
@@ -59,6 +59,8 @@ Three corollaries drive the entire protocol:
    - **Independence.** The "independent" in the theorem is doing enormous work. Correlated jurors behave like *one* juror with the reliability of one juror — the *n →* benefit evaporates. We **engineer** independence by **decorrelating the council** (§5).
 3. **The theorem inverts below ½.** If we put a question to the council on which members are *worse than random* (e.g. a deeply subjective aesthetic call dressed up as a factual one, or a domain all members hallucinate in the same direction on), aggregation makes things **worse**, confidently. This is the protocol's most important failure mode to guard against, and the reason **determinism-first** (§4.2) and **escalation** (§7) exist: never aggregate votes on a question the council is collectively worse-than-random on — *check it* or *escalate it* instead.
 
+> **Low dispersion is not evidence of correctness.** A *correlated, confidently-wrong* council — members sharing a base model that hallucinate in the same direction — produces **low** dispersion *and* a confident posterior while being collectively wrong (the §2.2-corollary-3 inversion in its most dangerous form). Agreement measures correlation, not truth. The protocol therefore never treats low dispersion as a health signal on its own; it must be read against **verification coverage** — the fraction of the decision that was machine-decidable (G0) — which is surfaced as a first-class signal owned by [`07`](./07-observability.md) and consumed by the controller in [`03`](./03-control-loop.md). Stress-testing confident agreement with a **decorrelated red-team lane** (§5.1) is the in-protocol defense.
+
 ### 2.3 The two central levers
 
 From §2.2, everything we can do to make the council trustworthy reduces to **two levers**:
@@ -68,15 +70,17 @@ From §2.2, everything we can do to make the council trustworthy reduces to **tw
 | **L1 — Constrain the output space** | Raises each juror's per-question competence `p` toward 1 and shrinks the space in which a juror can be nondeterministic. The more a judgment is mechanically pinned, the higher `p`; in the limit (machine-checkable) `p = 1` and no vote is needed. | Typed proposals (§4.1) + deterministic verification-first (§4.2). |
 | **L2 — Decorrelate the agents** | Restores the independence premise so the `n →` benefit of CJT is real, not nominal. | Diverse council composition + **blind** isolated-first voting (§5). The chief threat is **premature deliberation**, which *correlates* errors via herding/sycophancy (§5.3). |
 
-> **Reading the rest of this spec:** §4 is L1. §5 is L2. §6 weights jurors by calibrated track record (a CJT refinement: weight competent jurors more). §7 is bounded deliberation, used *only* when blind aggregation is genuinely split. §8 turns the aggregate into a posterior + dispersion. Everything serves the two levers.
+> **Reading the rest of this spec:** §4 is L1. §5 is L2. §6 weights jurors by a **scalar track record** (a CJT refinement: weight competent jurors more) and **quarantines mechanical off-protocol behavior separately**. §7 is bounded deliberation, used *only* when blind aggregation is genuinely split. §8 turns the aggregate into a posterior + dispersion. Everything serves the two levers.
 
 ### 2.4 What "probabilistically Byzantine fault tolerant" buys us
 
 We claim the protocol is **probabilistically Byzantine fault tolerant (pBFT-stochastic)** in this precise sense:
 
 - For decisions reducible to machine-checkable predicates, tolerance is **deterministic and total**: a wrong member cannot flip the outcome, because the outcome isn't voted on (§4.2).
-- For genuinely subjective decisions, tolerance is **probabilistic**: the probability that the *committed* decision is wrong decreases (a) with council size, (b) with per-member competence, and (c) as inter-member error correlation → 0; and it is **bounded** by reputation weighting starving chronically-wrong members of influence (§6).
-- Against a *truly adversarial* minority (compromised keys, colluding members), safety degrades gracefully to the classical supermajority guarantee: an adversary controlling `< ⅓` of *reputation weight* cannot force an ordinary commit, and `< ¼` cannot force a constitutional one. The forensic/eviction response to detected adversaries lives in [`08`](./08-trust-and-security.md).
+- For genuinely subjective decisions, tolerance is **probabilistic**: the probability that the *committed* decision is wrong decreases (a) with council size, (b) with per-member competence, and (c) as inter-member error correlation → 0; and it is *softly* nudged by track-record weighting letting chronically-out-of-step members' influence sag (§6).
+- Against a *truly adversarial* minority (compromised keys, colluding members), safety degrades gracefully to the classical supermajority guarantee: an adversary controlling `< ⅓` of *voting weight* cannot force an ordinary commit, and `< ¼` cannot force a constitutional one. The forensic/eviction response to detected adversaries lives in [`08`](./08-trust-and-security.md).
+
+> **This is a *mitigated*, not a *guaranteed*, tolerance claim — correlated failure is the headline residual risk.** Premise (c) above is the load-bearing one and it is **never fully met**: at `n = 5–7` the council is nowhere near CJT's asymptotic regime, and a *novel* correlated failure (a shared model basin, a shared prompt blind spot) breaks the independence the bound assumes — directly, not gracefully. Track-record weighting **cannot** rescue this: a first-time correlated failure has no record to weight against. We therefore treat independence as something to **measure and manufacture, not assume**: a quorum is only treated as independent when its **base-model / harness diversity is measured** to clear a floor (operational precondition, §5.1, §10.1), and confident agreement is stress-tested by a decorrelated red-team lane (§5.1). The open question of *correlation-aware aggregation* is tracked in §12(a).
 
 ---
 
@@ -93,8 +97,9 @@ A glossary local to this spec, building on the anchor's §8.
 | **Blind vote** | A `Vote` cast by a Genesis member **in isolation**, before seeing peers' votes or rationales (§5). The decorrelation primitive. |
 | **Round** | One propose→critique→revise→re-vote cycle of bounded deliberation (§7). `rounds = 0` means the blind vote was decisive. |
 | **Posterior** | Aggregated probability the proposal is correct (anchor `Decision.posterior`); the acceptance test is a threshold on it (§8). |
-| **Dispersion** | A scalar measuring how *split* the council was after aggregation (anchor `Decision.dispersion`); emitted as the PID **divergence** dimension (§8.3, → [`03`](./03-control-loop.md)). |
-| **Calibration** | How well a member's stated `confidence` matches its empirical hit rate. Drives reputation (§6). |
+| **Dispersion** | A scalar measuring how *split* the council was after aggregation (anchor `Decision.dispersion`); emitted as the steering-loop **divergence** dimension (§8.3, → [`03`](./03-control-loop.md)). |
+| **Track record** | A member's observed agreement-with-ground-truth rate on the **machine-measurable subset** of past decisions, blended with a class prior. A **scalar weight in [0,1]** that decays toward the prior (§6). Not a trained calibration model. |
+| **Off-protocol** | Mechanically-detectable misbehavior — equivocation, schema violation, signature failure — caught deterministically and **quarantined** via quorum / human escalation, *separately* from the learned weight (§6.5). |
 | **Ground truth** | The eventual signal a vote is scored against: the verification outcome where one exists, plus later execution outcomes and user feedback (§6.2). Often **lagged**. |
 | **Escalation** | Handing an unresolved split to the user via the mailbox (§7.4, → [`06`](./06-interaction-and-mailbox.md)). |
 
@@ -126,8 +131,9 @@ A glossary local to this spec, building on the anchor's §8.
         │  └─────┬──────┘                                       │
         │        ▼                                              │
         │  ┌────────────┐                                       │
-        │  │ 4. REP.    │  weight each vote by calibrated       │
-        │  │  weight    │  track record (drifters → 0)          │
+        │  │ 4. TRACK   │  weight each vote by SCALAR           │
+        │  │  RECORD    │  track record (drifters → 0);         │
+        │  │            │  off-protocol → quarantine (§6.5)     │
         │  └─────┬──────┘                                       │
         └────────┼──────────────────────────────────────────────┘
                  ▼
@@ -231,7 +237,7 @@ enum VerificationVerdict {
 | **Invariant preservation** | org-chart stays acyclic; every Worker has ≥1 reachable goal; no orphaned sub-goal; kernel roles never drop below bootstrap minimum | Configuration | yes |
 | **Progress consistency** | task-graph stays a DAG; no artifact references a non-existent task; resolved sub-goals stay resolved (monotonicity where required) | Progress | yes |
 | **Executable checks** | *if the diff implies code/config that compiles or has tests:* it compiles; tests pass; lints clean | both | yes (when applicable) |
-| **Resource/budget bounds** | proposed spawn count within budget; cost projection under the PID cost ceiling | Configuration | yes |
+| **Resource/budget bounds** | proposed spawn count within budget; cost projection under the steering-loop cost ceiling | Configuration | yes |
 | **Subjective residue** | "is this the *right* re-org?", "is this sub-goal decomposition *good*?" | both | **no — this is what the vote is for** |
 
 **The branch that defines the protocol:**
@@ -279,6 +285,10 @@ enum RoleLens {
 
 The intuition: a homogeneous council (same model, same prompt, same seed) is *one juror wearing a costume n times* — its votes are near-perfectly correlated and CJT gives almost nothing. A heterogeneous council approximates *n* independent draws. **Composing a maximally-diverse council is committed design (§11.4):** the protocol maintains a running agreement-beyond-chance correlation matrix and composes councils to *minimize expected inter-juror correlation subject to a per-agent competence floor*, with the correlation prior keyed off a juror descriptor (`{tool, version, model_family, scaffold, prompt_template_hash}`, `model_family` weighted most; descriptor owned by [`04`](./04-runtime-and-harness.md), correlation estimation owned here). The diversity↔competence tradeoff (an exotic model may be more independent but less competent, lowering `p`) is bounded by the competence floor; live recomposition is a *slow control surface* in [`03`](./03-control-loop.md).
 
+> **Measured diversity is an operational precondition, not an assumption (ROB-02).** A quorum is treated as *independent* — and therefore eligible for the CJT-derived tolerance posture (§2.4) — only when its **measured base-model / harness diversity clears a floor**: the participating jurors must span at least a minimum number of distinct `model_family` values (and not be dominated by any single family beyond a cap). If a round's participating set collapses below that diversity floor (e.g. only same-family jurors responded before the deadline), the quorum is **not** counted as independent: the decision is treated as low-assurance and routed per the blast-radius tiers (§9, §10) — held or escalated for high-blast-radius proposals rather than committed on a nominal supermajority that is really *one juror n times*.
+
+> **Decorrelated red-team lane for high-blast-radius proposals (ROB-01).** Every **high-blast-radius / irreversible / constitutional** proposal must include **at least one red-team lane (`RoleLens::Adversary`) drawn from a deliberately *different model population*** than the rest of the council — a juror whose failure modes are engineered to be decorrelated from the majority. Its job is to *stress-test confident agreement from a decorrelated source*: a correlated, confidently-wrong council that all shares a basin will tend to agree, and the cross-population red-team lane is the in-protocol mechanism most likely to break that agreement. A high-blast-radius proposal that cannot be staffed with such a lane does not get the autonomous fast path; it holds or escalates (§9, §10). This couples to the **verification-coverage** signal owned by [`07`](./07-observability.md)/[`03`](./03-control-loop.md): low dispersion at low verification coverage *without* a dissenting red-team lane is a risk signal, not a green light (§2.2, §8.3).
+
 ### 5.2 Layer 3: The blind vote (decorrelate by procedure)
 
 Each council member casts its `Vote` **in isolation**: it sees the proposal, the `VerificationReport`, and the world-model head — but **not** any peer's vote, confidence, or rationale. This is the **blind vote**, and it is the procedural heart of Lever 2.
@@ -310,7 +320,7 @@ Procedure for the blind round (`round = 0`):
 
 The commit-then-reveal step matters even in the blind round: it prevents a slow or compromised member from waiting to see others and *tailoring* its vote, which would reintroduce correlation through the back door.
 
-Each member also self-reports `confidence` — its own estimate of `P(my verdict is correct)`. Confidence is **not** taken at face value; it is **calibrated against history** by reputation (§6). A chronically over-confident member's stated confidence is discounted.
+Each member also self-reports `confidence` — its own estimate of `P(my verdict is correct)`. Confidence is **not** taken at face value; in aggregation it is **discounted by the voter's scalar track-record weight** (§6, §8.1), so a member with a poor track record cannot buy posterior by reporting high confidence.
 
 ### 5.3 The cardinal sin: premature deliberation
 
@@ -328,29 +338,36 @@ Each of these **raises inter-juror error correlation**, which — per CJT — *e
 
 ---
 
-## 6. Layer 4 — Calibrated reputation weighting
+## 6. Layer 4 — Track-record weighting (and mechanical off-protocol quarantine)
 
-CJT in its weighted form says: **don't count jurors equally — weight each by its competence.** An optimal weighted majority weights juror *i* by `log(p_i / (1 - p_i))`. Reputation is Metatron's running, calibrated estimate of each juror's `p_i`, and it is the mechanism by which **chronic drifters decay toward zero influence automatically** (anchor §6.4).
+CJT in its weighted form says: **don't count jurors equally — weight each by its competence.** But Metatron votes with a **small, fixed council (5–7)**, scored against ground truth that **arrives late and often never** (§6.2), where the verification gate (G0) can only score the **machine-checkable subset** of a proposal — never the subjective residue the jurors actually voted on. That data budget cannot support an RL-grade estimator. Reputation here is therefore deliberately **modest**: a **scalar track-record weight in `[0,1]` that decays toward a class prior**, *not* an adaptive-control economy. There is **no** proper-scoring-rule training of a stateless LLM's confidence, **no** beta-Bayesian shrinkage as the mechanism, and **no** eligibility-trace credit assignment — those were over-fitted to a data regime this council does not have.
 
-### 6.1 What reputation is
+Two concerns earlier editions fused are kept **strictly separate**:
+
+- **Track-record weighting** (§6.1–§6.4) — a *soft, statistical* nudge that lets a demonstrably-out-of-step voter's influence sag toward a floor. It never evicts, and on its own it never quarantines.
+- **Mechanical off-protocol detection** (§6.5) — *hard, deterministic* catches (equivocation, schema violation, signature failure). These are **not** routed through the learned weight; they are detected mechanically and **quarantined via quorum / human escalation**.
+
+> **Why separate them?** The learned weight is a slow, lagged, noisy estimate fit to scarce data; conflating it with off-protocol enforcement would mean a signature forgery or an equivocation waits on a statistical estimator to "notice." Hard misbehavior is mechanically decidable *now*, so it is handled *now* (§6.5), leaving the weight to do only the soft job it can actually support.
+
+### 6.1 What the weight is
 
 ```rust
 /// (anchor: Reputation(f32) in [0,1])
 struct ReputationState {
     agent: AgentId,
-    skill: f32,          // calibrated competence estimate p_i in [0,1]; the headline Reputation
-    calibration: f32,    // how well stated confidence matches realized hit-rate (Brier-based)
-    weight: f32,         // derived voting weight (see 6.4); 0 means effectively evicted from influence
-    samples: u32,        // decisions scored against ground truth so far (low -> shrink to prior)
+    weight: f32,         // scalar track-record weight in [0,1]; 0 = no marginal influence
+    samples: u32,        // machine-scorable decisions seen so far (few -> sits at the class prior)
     last_update: LogicalTime,
 }
 ```
 
-A vote's effective weight in aggregation is a function of the voter's `skill` and `calibration`, *not* a flat 1. A member that has been right (against ground truth) and well-calibrated (its confidence tracks its hit rate) carries more weight; a member that drifts loses weight until it is, in effect, a non-voter — without any explicit eviction event.
+The weight is a **single scalar** — there is no separate `skill`/`calibration` pair and no trained confidence model. It is the voter's **observed agreement-with-ground-truth rate on the machine-measurable subset** of past decisions, blended with a population **class prior** and pulled back toward that prior over time (§6.3). A member that has been repeatedly out of step (against the part of ground truth we can actually measure) sags toward the floor until it is, in effect, a non-voter — without any explicit eviction event; a fresh or rarely-tested member sits near the prior, so influence is *earned* against evidence rather than assumed.
+
+> **Claim narrowed to the measurable subset.** `weight` is a defensible estimate of *"how often this juror has matched ground truth **on the machine-checkable part**"* — it is **not** a calibrated `P(juror matches ground truth)` over subjective judgments, because that ground truth is mostly unavailable and lagged (§6.2). The weight is a soft prior on whom to trust on the residue, extrapolated from the measurable part; it is explicitly *not* a measurement of competence on the residue itself.
 
 ### 6.2 Ground truth (and its lag)
 
-A vote can only be rewarded or penalized against *something*. Metatron uses a **layered, increasingly-authoritative** notion of ground truth, accepting that the better signals **arrive late**:
+A vote can only be scored against *something*, and only the machine-measurable part can be scored cheaply and immediately. Metatron uses a **layered, increasingly-authoritative** notion of ground truth, accepting that the better signals **arrive late** (and that the weight in §6.1 is computed only over what these tiers can actually adjudicate):
 
 | Tier | Signal | Latency | Authority |
 |------|--------|---------|-----------|
@@ -358,64 +375,65 @@ A vote can only be rewarded or penalized against *something*. Metatron uses a **
 | **G1 — Execution outcome** | After commit, the Execution plane reconciles. Did the change actually achieve its diff's intent without trap storms / rollback / invariant breach observed downstream? (via [`04`](./04-runtime-and-harness.md), [`07`](./07-observability.md)) | minutes–hours | medium |
 | **G2 — User feedback** | The user's eventual acceptance/rejection/correction via the mailbox ([`06`](./06-interaction-and-mailbox.md)). The ultimate setpoint. | hours–days, sometimes never | highest, sparsest |
 
-The **lag** is fundamental: at vote time we do *not* know G2, and often not G1. Reputation updates are therefore **retroactive** — a `Decision` is recorded with its votes, and as ground-truth tiers arrive they are *joined back* to those votes to update reputations. The attribution policy is committed design (§11.1): a vote is **scored on whatever tier has arrived under a staleness discount**; a never-arriving G2 is scored on G0/G1 alone at lower weight; and **credit is assigned back to the originating proposal along the causal trace-id chain ([`07`](./07-observability.md)) with eligibility-trace decay** over intervening commits. (Only the empirical discount/decay constants remain open — §12b.)
+The **lag** is fundamental: at vote time we do *not* know G2, and often not G1. Track-record updates are therefore **retroactive** — a `Decision` is recorded with its votes, and as ground-truth tiers arrive they are *joined back* to those votes to nudge the weight. A vote is scored on **whatever tier has arrived**; a **never-arriving G2** does not block scoring — the vote is scored on **G0/G1 only**. Credit is attributed back to the originating proposal along the causal trace-id chain ([`07`](./07-observability.md)) with a **simple decay** over intervening commits — *not* an eligibility-trace mechanism. (Only the empirical decay/discount constants remain open — §12b.)
 
-### 6.3 Update dynamics
+### 6.3 Update dynamics (scalar, prior-reverting)
 
-Three forces, applied when a ground-truth tier resolves for a past decision:
+Two forces only, both acting on the single scalar:
 
 ```rust
-struct GroundTruth {
-    proposal: Hash,
-    correct_verdict: Verdict,    // the verdict ground truth now implies was right
-    source: GroundTruthTier,     // G0 | G1 | G2
-    confidence_of_truth: f32,    // weaker for G1 than G0; user (G2) ~ 1.0
-}
-
-fn update_reputation(rep: &mut ReputationState, v: &Vote, gt: &GroundTruth) {
-    // 1) REWARD alignment: move skill toward 1 if v.verdict == gt.correct_verdict, else toward 0.
-    //    Bayesian-style: treat each scored vote as evidence about p_i; shrink to a prior when samples
-    //    are few (no juror is trusted or distrusted on n=3 decisions).
-    // 2) CALIBRATE: score the *confidence*, not just the verdict, with a proper scoring rule
-    //    (Brier / log loss). Confident-and-right is rewarded more than hedged-and-right;
-    //    confident-and-WRONG is penalized hardest. This trains honest confidence reporting.
-    // 3) SLASH outliers / off-protocol: a vote that is not merely wrong but *off-protocol*
-    //    (malformed, equivocating, abstaining to avoid accountability, or a lone confident vote
-    //    against a strong correct consensus that later proves wrong) takes an extra penalty,
-    //    reported by Sentinels (00 taxonomy) / 08.
+fn update_weight(rep: &mut ReputationState, agreed_with_ground_truth: bool) {
+    // 1) NUDGE: move `weight` a bounded step toward 1 if the vote matched the (machine-measurable)
+    //    ground truth, toward 0 if it did not. Bounded step: no single decision swings the weight
+    //    far (anti-whipsaw). With few `samples`, the weight stays near the class prior — a
+    //    rarely-tested member is neither trusted nor distrusted.
+    //    There is NO proper-scoring-rule term and NO confidence-calibration training here.
 }
 
 fn decay(rep: &mut ReputationState, now: LogicalTime) {
-    // 4) DECAY toward the prior over time / inactivity. Stale reputation (good OR bad) is
-    //    untrustworthy: a member that hasn't been tested recently drifts back toward the
-    //    population prior, so neither permanent coronation nor permanent exile is possible
-    //    without ongoing evidence. Chronic drifters, never earning back skill, decay toward 0 weight.
+    // 2) DECAY toward the class prior over time / inactivity. Stale track record (good OR bad) is
+    //    untrustworthy: without fresh evidence the weight regresses to the prior, so neither
+    //    permanent coronation nor permanent exile is possible. Chronic non-responders / out-of-step
+    //    members, never re-earning, sit at or below the prior and contribute ~0 marginal weight.
 }
 ```
 
-The concrete update rule is committed design (§11.3): a **proper scoring rule (log/Brier)** against ground truth, a **Bayesian beta-style update around a class prior** with shrinkage on low samples, **bounded slashing** (no single event zeroes an agent), and a **tunable decay half-life** toward the class prior. Reputation *acquisition* for a fresh agent is class-prior-with-decay (locked in [`08`](./08-trust-and-security.md)). The rule satisfies, by construction, the following properties (its empirical constants remain open — §12b):
+Note what is **absent** versus earlier editions: no asymmetric slashing of "confident + wrong" votes *inside the weight* (off-protocol slashing moved to §6.5, where it is mechanical), no beta-distribution posterior, no eligibility traces. The update is a bounded, prior-reverting move on a scalar — and is a **pure function of recorded inputs**, so the weight history is replayable from the Merkle DAG + ground-truth log (auditability; [`08`](./08-trust-and-security.md)). Track-record *acquisition* for a fresh agent is class-prior-with-decay (locked in [`08`](./08-trust-and-security.md)).
 
-- **Bounded:** `skill, calibration, weight ∈ [0,1]`; no single decision can swing a reputation arbitrarily (anti-whipsaw).
-- **Shrinkage on low samples:** new or rarely-tested members sit near a neutral prior; influence is *earned*.
-- **Proper scoring of confidence:** truthful confidence reporting must be the dominant strategy (Brier/log loss), or jurors learn to game `confidence`.
-- **Asymmetric slashing:** *confident + wrong + off-protocol* is punished harder than *honestly uncertain + wrong*, to discourage overconfident bluffing while not punishing honest abstention into oblivion.
-- **Decay / no permanence:** reputations regress to the prior without fresh evidence.
-- **Replayable:** the update is a pure function of `(prior reputation, vote, ground truth)`, all of which are recorded, so reputation history is reconstructible from the Merkle DAG + ground-truth log (auditability; [`08`](./08-trust-and-security.md)).
-
-### 6.4 From reputation to voting weight
+### 6.4 From track record to voting weight
 
 ```rust
 fn voting_weight(rep: &ReputationState) -> f32 {
-    // Monotone in skill and calibration, shrunk by sample count, floored at 0.
-    // Interpretable as a (clamped) estimate of CJT's log-odds weight log(p/(1-p)),
-    // normalized so the council's weights sum to a fixed budget.
-    // A drifter with skill -> 0.5 contributes ~0 marginal information and ~0 weight;
-    // skill < 0.5 (worse than random) is floored to 0, never NEGATIVE-weighted, to avoid
-    // a compromised member gaining influence by being reliably inverted.
+    // Monotone in the scalar track-record weight, shrunk toward the class prior by low sample count,
+    // floored at 0, and normalized so the council's weights sum to a fixed budget.
+    // A member at the prior contributes ~prior influence; a chronic drifter floors at 0.
+    // A track record < 0.5 (worse than random on the measurable subset) is floored to 0, never
+    // NEGATIVE-weighted, to avoid a compromised member gaining influence by being reliably inverted.
 }
 ```
 
-Thresholds (§9) are computed over **reputation-weighted** participation, not head-count. "⅔ of the council" means *⅔ of participating voting weight*.
+Thresholds (§9) are computed over **voting-weight-weighted** participation, not head-count. "⅔ of the council" means *⅔ of participating voting weight*.
+
+### 6.5 Mechanical off-protocol detection and quarantine (separate from the weight)
+
+Hard, **off-protocol** misbehavior is **not** left to the learned weight to discover. It is **mechanically detected** and **quarantined**, independently of track record:
+
+| Off-protocol class | Detection (deterministic) | Response |
+|--------------------|---------------------------|----------|
+| **Equivocation** | reveal ≠ sealed commitment, or two signed conflicting votes (§5.2, §10.3) | discard the vote; quarantine the member from the round; emit a security event to [`08`](./08-trust-and-security.md) |
+| **Schema violation** | a `Vote`/`SealedVote` that does not typecheck or violates the round protocol | discard mechanically; does not count toward quorum |
+| **Signature failure** | a vote whose signature does not verify against the member's `AgentId` key | discard; non-repudiable; emit to [`08`](./08-trust-and-security.md) |
+
+**Quarantine, not slashing-by-weight.** A quarantined member's votes are *excluded* from the round; whether it is *evicted* (a constitutional council change, §9.2) or its keys revoked is decided by **quorum / human escalation** in [`08`](./08-trust-and-security.md) — *not* by silently driving a learned reputation to zero. This keeps enforcement **deterministic and auditable** and keeps the soft weight doing only soft work. Off-protocol events are surfaced to [`07`](./07-observability.md) and feed the forensic response in [`08`](./08-trust-and-security.md); the consensus layer does not try to "out-vote" a cryptographic adversary (§10.3).
+
+### 6.6 Burn-in / cold-start regime (ROB-03)
+
+Because the weight **shrinks to the class prior with no samples**, at **genesis** and **after every council recomposition** the council runs as a **near-flat-headcount majority among uncalibrated jurors** — exactly when the decisions in flight (forming/reshaping the kernel) are most consequential and least reversible. A burn-in regime compensates for the window the weight cannot:
+
+- **Until calibrated samples exist** (per-member `samples` below a floor, recorded as a `Configuration`-layer flag), the council is in **burn-in** and weights are treated as ~uniform.
+- During burn-in, **autonomous commits are restricted to high-verification-coverage proposals** — those where G0 can carry the assurance the track record cannot. The **verification-coverage** fraction (owned by [`07`](./07-observability.md)) gates the autonomous path.
+- **Low-coverage and/or high-blast-radius decisions during burn-in are routed to human escalation** (§7.4, §10), never auto-committed on a nominal supermajority of uncalibrated jurors.
+- **Recomposition re-enters burn-in.** Every `WidenCouncil` / `Decorrelate` / recompose (§10.4) resets the affected members' `samples` and re-opens this window — so the burn-in gate and the break-glass recovery path (§10.4, ROB-04) are designed together.
 
 ---
 
@@ -484,7 +502,9 @@ Deliberation halts on the **first** of: (a) a round produces a *decisive* re-vot
 
 The protocol **does not** break ties by fiat, coin-flip, or chair's-casting-vote. A persistent split is *information*: it means the question is genuinely subjective or under-specified — exactly the case where, per §2.2 corollary 3, aggregation may be worse-than-random and the council should **not** pretend to decide.
 
-The escalation response is **tiered by blast radius** (committed design, §11.6): **high-stakes** proposals escalate to the **user via the mailbox**, while **low-stakes** ones get a **controller-level** response (auto-simplify, Guardian re-decomposition, or widen the council) without burdening the user — see [`03`](./03-control-loop.md). For an escalated high-stakes split, the proposal, its `VerificationReport`, the vote history, the de-identified critiques, and the residual dispersion are packaged and handed to the **user via the mailbox** ([`06`](./06-interaction-and-mailbox.md)). The affected work **blocks** until the user resolves it (anchor §5). The user's resolution is high-authority G2 ground truth and feeds reputation (§6.2). (Whether *persistent structural* splits need a still-higher controller response beyond this remains open — §12c.)
+The escalation response is **tiered by blast radius** (committed design, §11.6): **high-stakes** proposals escalate to the **user via the mailbox**, while **low-stakes** ones get a **controller-level** response (auto-simplify, Guardian re-decomposition, or widen the council) without burdening the user — see [`03`](./03-control-loop.md). For an escalated high-stakes split, the proposal, its `VerificationReport`, the vote history, the de-identified critiques, and the residual dispersion are packaged and handed to the **user via the mailbox** ([`06`](./06-interaction-and-mailbox.md)). The affected work **holds** for the user's resolution (anchor §5). The user's resolution is high-authority G2 ground truth and feeds the track record (§6.2). (Whether *persistent structural* splits need a still-higher controller response beyond this remains open — §12c.)
+
+> **Bounded escalation, never "indefinitely" (UX-04, CONV-E).** No escalation may block forever. The hold is governed by the system-wide **uniform escalation-timeout** policy: a *bounded* wait for the user, and on expiry a **defined safe fallback** — **hold + degrade safely**, and **never silently proceed on an irreversible action**. For a held high-stakes split this means the proposal stays uncommitted and the affected sub-goal is parked in a safe, observable state; reversible neighbours may continue, irreversible ones do not auto-fire. The same bounded-wait → safe-fallback shape applies to the quorum-failure path (§10.2) and the deadlock path (§10.4), so every human-block path in this spec has a defined terminal behaviour rather than an open-ended stall.
 
 ```rust
 enum Outcome {
@@ -517,8 +537,9 @@ fn aggregate(votes: &[Vote], reps: &ReputationMap, vr: &VerificationReport) -> W
     // Start from a PRIOR informed by verification (a Certified-residue proposal starts higher
     // than one that merely scraped through Indeterminate checks).
     // For each vote, fold in evidence whose STRENGTH scales with the voter's voting_weight (§6.4)
-    // AND the voter's *calibrated* confidence (a well-calibrated 0.9 moves the posterior more
-    // than a poorly-calibrated 0.9). Approve pushes the posterior up, Reject down, Abstain ~ no-op
+    // AND its self-reported confidence, with that confidence DISCOUNTED by the voter's scalar
+    // track-record weight (a low-track-record 0.9 moves the posterior less than a high-track-record
+    // 0.9). Approve pushes the posterior up, Reject down, Abstain ~ no-op
     // (but counts against participation, §10).
     // The form is COMMITTED (§11.2): a reputation-weighted log-odds (naive-Bayes) pool
     // DISCOUNTED by an estimated correlation factor (from descriptor similarity; 04-OQ6) so
@@ -530,8 +551,8 @@ fn aggregate(votes: &[Vote], reps: &ReputationMap, vr: &VerificationReport) -> W
 Required properties of the aggregator (form-independent):
 
 - **Monotone** in each Approve weight×confidence (more credible approval ⇒ higher posterior) and anti-monotone in Reject.
-- **Calibration-aware:** stated confidence is discounted by the voter's `calibration`, so bluffing doesn't buy posterior.
-- **Reputation-bounded:** a low-weight (drifter) vote can barely move the posterior — the CJT weighting (§6) is *the* defense against a single rogue member.
+- **Track-record-discounted:** stated confidence is discounted by the voter's scalar track-record weight (§6), so a low-track-record voter's bluff doesn't buy posterior.
+- **Weight-bounded:** a low-weight (drifter) vote can barely move the posterior — the CJT weighting (§6) is *a soft* defense against a single out-of-step member (it does **not** by itself defend against a *correlated* council — see §2.4, §5.1).
 - **Verification-anchored:** the prior reflects the `VerificationReport`; the vote only adjudicates the *residue*.
 - **Replayable & auditable:** `aggregate` is a pure function of recorded inputs; the `Decision` stores enough to recompute it.
 
@@ -573,16 +594,26 @@ fn decide(tally: &WeightedTally, kind: ProposalKind, cfg: &ConsensusConfig) -> D
 ```
 
 - **`passed`** requires *both* the posterior clearing the threshold *and* quorum (§10). A high posterior from too little participating weight is **not** a pass.
-- **`dispersion`** is emitted as the **`ErrorVector.divergence`** dimension consumed by the PID controller in [`03`](./03-control-loop.md). A chronically high-dispersion council is a *measured* control error — the controller may respond by recomposing the council, slowing the cadence, or escalating policy. *This is the one place the consensus protocol feeds the control loop directly.*
+- **`dispersion`** is emitted as the **`ErrorVector.divergence`** dimension consumed by the steering loop in [`03`](./03-control-loop.md). A chronically high-dispersion council is a *measured* control error — the controller may respond by recomposing the council, slowing the cadence, or escalating policy. *This is the one place the consensus protocol feeds the control loop directly.* **But low dispersion is not, by itself, a health signal (ROB-01):** a correlated, confidently-wrong council also reads low (§2.2). Dispersion must be consumed alongside the **verification-coverage** signal owned by [`07`](./07-observability.md): *low dispersion + low verification coverage + no dissenting red-team lane* (§5.1) is an **escalating risk composite**, not a green light — the controller in [`03`](./03-control-loop.md) must escalate, not relax, on it.
 - A `passed` decision is handed to signing (§9.3) and becomes a `Commit`; a non-passed decisive decision is `Rejected`; a non-passed split decision is `Escalated`.
 
 ---
 
 ## 9. Thresholds, constitutional changes, and signing
 
-### 9.1 Ordinary threshold — reputation-weighted ⅔
+The write path is **tiered by blast radius (CONV-C / UX-03)** — *full council consensus is not paid on every diff.* A `Proposal` is routed to exactly one of three tiers by its blast radius, and only the upper two convene the council:
 
-Ordinary proposals (spawn a Worker, rewire a team, decompose a sub-goal, mark progress) pass when `posterior ≥ ⅔` over participating voting weight, with quorum met. This is the BFT supermajority posture, ported to weighted-posterior form: an adversary or drift cluster controlling `< ⅓` of *weight* cannot force a commit.
+| Tier | What it covers | Path |
+|------|----------------|------|
+| **Routine** | reversible, low-blast-radius advances: **Worker spawns, progress-layer updates, routine wiring** | **single Guardian + post-hoc audit**, optimistic concurrency on the head (§9.4) — **no council round** |
+| **Ordinary** | consequential but non-constitutional changes (a team re-org, a sub-goal decomposition that re-shapes work, anything **irreversible** per the reversibility predicate) | full blind-vote council, **⅔** posterior (§9.1) |
+| **Constitutional** | kernel-membership changes (add/remove a Genesis or Guardian) | full blind-vote council, **¾** posterior (§9.2) |
+
+The reversibility predicate and the irreversible-default that route a proposal up out of the Routine tier are owned by [`01`](./01-state-model.md) / the reversibility classifier (`reversible` ≡ no external side effect through the `mcp-auth-proxy` **and** a revertible DAG diff; unknown ⇒ escalate). The remainder of §9 specifies the two council tiers; §9.4 specifies the Routine fast path.
+
+### 9.1 Ordinary threshold — voting-weight-weighted ⅔
+
+Ordinary proposals — **high-blast-radius or irreversible** non-constitutional changes (a team re-org, a sub-goal decomposition that re-shapes committed work, any diff the reversibility predicate flags irreversible) — pass when `posterior ≥ ⅔` over participating voting weight, with quorum met. (Routine reversible advances such as worker spawns and progress updates do **not** take this path; see §9.4.) This is the BFT supermajority posture, ported to weighted-posterior form: an adversary or drift cluster controlling `< ⅓` of *weight* cannot force a commit.
 
 ### 9.2 Constitutional threshold — reputation-weighted ¾
 
@@ -605,7 +636,29 @@ Both **votes** and the resulting **commit** are **cryptographically signed**; th
 2. A `Commit` (anchor canonical type) is assembled with `proposal`, `decision`, `author` (the Guardian), `state_root` (= `VerificationReport.state_after`), `parent` (the prior head), and the **quorum of Genesis `signatures`**.
 3. The commit is appended at the **head**; consensus serializes the head, so concurrent proposals against the same base are resolved by rebase/stale-base admission errors (§4.1), keeping forks transient (anchor §8 "Head").
 
-A `Commit` is only valid if it carries a quorum of valid signatures *and* embeds a `Decision` whose `passed == true` and whose recomputation from the recorded inputs reproduces `posterior`/`dispersion` — making the entire chain re-verifiable offline.
+A `Commit` is only valid if it carries a quorum of valid signatures *and* embeds a `Decision` whose `passed == true` and whose recomputation from the recorded inputs reproduces `posterior`/`dispersion` — making the entire chain re-verifiable offline. (This validity rule applies to council-tier commits; Routine-tier commits carry a single Guardian signature and an audit marker instead — §9.4.)
+
+### 9.4 Routine / reversible writes — single-Guardian fast path (CONV-C / UX-03)
+
+The **high-churn common case** — worker spawns, progress-layer updates, routine wiring — is **reversible and low-blast-radius**, and paying a full blind-vote council round on it is the throughput bottleneck UX-03 identifies. Routine writes therefore **bypass full council consensus**:
+
+- **Single-Guardian authority.** A Routine proposal is admitted (§4.1) and run through the **same deterministic verification** (§4.2) — a `Refuted` routine diff is still rejected mechanically — but it is then committed under the **authority of a single Guardian**, with **no blind-vote council round** and no posterior/dispersion aggregation.
+- **Optimistic concurrency on the head.** Routine commits use cheap optimistic concurrency against the serialized head: a stale-base routine write is rejected with `StaleBase` (§4.1) and rebased/retried, rather than serialized through a council. This keeps the single-ordered-log property (the system-of-record) while removing the council from the hot path.
+- **Post-hoc audit, not pre-hoc vote.** Routine commits are **sampled and audited after the fact** by the council / Sentinels ([`07`](./07-observability.md)): the audit is what catches a misrouted or misbehaving Guardian, and an audit miss can retroactively escalate a routine commit to a council review or a revert (the diff is reversible by construction). The Guardian's routine track record feeds §6 like any other ground-truth signal.
+- **Tier is mechanical, not discretionary.** Whether a proposal qualifies as Routine is decided by the **reversibility predicate** (no external side effect through the `mcp-auth-proxy` **and** a revertible DAG diff; **unknown ⇒ not Routine ⇒ escalate**, owned by [`01`](./01-state-model.md)) and a blast-radius bound — *not* by the authoring Guardian's say-so. Anything irreversible, high-blast-radius, or constitutional is routed to the council tiers (§9.1/§9.2). A Guardian cannot self-classify a consequential change as Routine to dodge the council.
+
+```rust
+enum WriteTier { Routine, Ordinary, Constitutional }
+
+fn write_tier(p: &Proposal, head: &WorldModel) -> WriteTier {
+    // Constitutional iff the diff touches kernel membership (§9.2).
+    // Else Routine iff reversible(p, head) AND within the routine blast-radius bound;
+    //   reversible(...) is the 01-owned predicate; UNKNOWN reversibility ⇒ NOT Routine.
+    // Else Ordinary.
+}
+```
+
+This is the blast-radius tiering applied to the **actual write path**, not merely described: only Ordinary and Constitutional proposals convene the council; the cheap, reversible majority of writes never do.
 
 ---
 
@@ -624,14 +677,39 @@ LLM-backed members are slow and sometimes unreachable. The protocol must make pr
 
 - **Per-round deadline (`round_deadline`).** Members who don't return a sealed vote by the deadline are **excluded from that round's tally** (their weight does not participate). They are *not* counted as Reject or Approve — silence is not a vote.
 - **Abstention vs. silence.** An explicit `Abstain` participates (counts toward quorum, ~neutral on posterior); silence does not count toward quorum at all. This distinguishes "I considered it and have no strong view" from "I was unavailable."
-- **Quorum miss → stall, then escalate.** If, after the deadline, `participating_weight < quorum_weight`, the decision **stalls**. The protocol retries with backoff for a bounded number of attempts; persistent quorum failure is itself **escalated to the user** ([`06`](./06-interaction-and-mailbox.md)) and surfaced as a liveness alarm on the Observability plane ([`07`](./07-observability.md)). A council that cannot muster quorum is a *control failure*, not a silent stall.
+- **Quorum miss → stall, then bounded escalate → safe fallback.** If, after the deadline, `participating_weight < quorum_weight`, the decision **stalls**. The protocol retries with backoff for a bounded number of attempts; persistent quorum failure is itself **escalated to the user** ([`06`](./06-interaction-and-mailbox.md)) and surfaced as a liveness alarm on the Observability plane ([`07`](./07-observability.md)). A council that cannot muster quorum is a *control failure*, not a silent stall. The escalation is **bounded, never indefinite (UX-04, CONV-E):** the user hold runs under the uniform escalation-timeout, and on expiry the protocol takes the **defined safe fallback** — **hold + degrade safely**, the proposal stays uncommitted, and **no irreversible action proceeds** without a human. A *constitutional* or *self-repair* proposal that cannot raise quorum (the council is too degraded to even participate) routes to the **break-glass recovery path in §10.4**, which does not depend on the broken quorum.
+
+> **Diversity-floor miss is handled here too (ROB-02).** If quorum *is* met by weight but the participating set fails the measured base-model/harness **diversity floor** (§5.1) — e.g. only same-`model_family` jurors responded — the round is **not treated as an independent quorum**. It is handled like a quorum miss for high-blast-radius proposals: hold/escalate rather than commit a nominal supermajority that is really one juror many times.
 - **Reputation feedback.** Chronic non-responders decay (§6.3 decay term + inactivity), reducing their `quorum_weight` contribution requirement over time and nudging the council toward recomposition via a (constitutional) proposal.
 
 ### 10.3 Equivocation (high level)
 
-**Equivocation** = a member presenting *different* votes to different observers, or revealing a vote that doesn't match its sealed commitment. The blind round's **commit-then-reveal** (§5.2) makes equivocation *detectable*: a reveal/commitment mismatch is mechanically caught and the vote discarded. Because votes are **signed** (§9.3), an equivocating member produces *two signed conflicting votes* — non-repudiable cryptographic proof of misbehavior. Detection here is in-scope; the **forensic response** (slashing severity, eviction via constitutional amendment, key revocation) is the **full threat model in [`08`](./08-trust-and-security.md)**. From the consensus protocol's view, a detected equivocation: (a) discards the vote, (b) triggers an off-protocol slash (§6.3), (c) emits a security event to [`08`](./08-trust-and-security.md)/[`07`](./07-observability.md).
+**Equivocation** = a member presenting *different* votes to different observers, or revealing a vote that doesn't match its sealed commitment. The blind round's **commit-then-reveal** (§5.2) makes equivocation *detectable*: a reveal/commitment mismatch is mechanically caught and the vote discarded. Because votes are **signed** (§9.3), an equivocating member produces *two signed conflicting votes* — non-repudiable cryptographic proof of misbehavior. Detection here is in-scope; the **forensic response** (eviction via constitutional amendment, key revocation) is the **full threat model in [`08`](./08-trust-and-security.md)**. From the consensus protocol's view, a detected equivocation: (a) discards the vote, (b) triggers **mechanical off-protocol quarantine** of the member (§6.5) — *not* a learned-weight penalty, (c) emits a security event to [`08`](./08-trust-and-security.md)/[`07`](./07-observability.md).
 
 > **Note on the threat boundary.** Equivocation is the one place the *stochastic* failure model (§2) gives way to the *adversarial* one: an honest LLM does not produce two signed conflicting votes — that requires either a bug or a compromised key. The protocol detects it deterministically and hands it to security; it does not try to "out-vote" a cryptographic adversary within the consensus layer.
+
+### 10.4 Council deadlock and break-glass recovery (ROB-04)
+
+The council's own **self-repair actions** — `WidenCouncil`, `Decorrelate`, recompose — are themselves `Configuration`-layer changes, and a recompose that adds/removes a kernel member is **constitutional (¾)**. This creates a circular recovery dependency: *a genuinely split or degraded council cannot pass the very proposals that would fix it.* The "controller steers the council back to health" loop ([`03`](./03-control-loop.md)) would have **no working actuator** in the one situation it exists for. The protocol therefore specifies a recovery path that **does not route through the broken quorum**.
+
+**Deadlock detection (what triggers recovery).** A council is declared **deadlocked** on a self-repair-relevant decision when *either*:
+
+- a self-repair / constitutional proposal **persistently splits** — escalation fires (§7.4) across `max_rounds` and `≥ K` retried attempts without ever clearing threshold; *or*
+- the council **cannot raise quorum** (§10.2) for such a proposal across the bounded retry budget; *or*
+- a **measured structural split** is observed: chronically high `dispersion` (§8.2) on the kernel-shaping decisions together with a diversity/participation floor miss (§5.1), surfaced as a liveness alarm by [`07`](./07-observability.md).
+
+These are mechanical, observable triggers — not a human's gut call — and crossing any of them arms the recovery path below.
+
+**Recovery path (two specified, ordered escapes).**
+
+1. **Human escalation is a first-class recovery, not a catch-all.** A detected council deadlock is **escalated to the user** ([`06`](./06-interaction-and-mailbox.md)) as an explicit *council-deadlock* escalation type (distinct from an ordinary split escalation), packaging the split history, the failed self-repair proposals, the dispersion/diversity evidence, and a proposed recomposition. This hold is **bounded** by the uniform escalation-timeout (§7.4, CONV-E): a bounded wait → **hold + degrade safely**; no irreversible council change fires silently.
+2. **Founder-threshold break-glass recompose.** If the user authorizes (or the deadlock is on the recovery itself), recomposition may proceed via a **break-glass path that bypasses the deadlocked quorum entirely**, ratified by a **threshold of founders** rather than by the broken council:
+   - **Authority & threshold.** Break-glass recompose is authorized by a **threshold-of-founders signature** consistent with the founder trust root in [`08`](./08-trust-and-security.md) (the same threshold-of-founders that anchors genesis). It is **not** ratifiable by the council it is repairing.
+   - **Scope.** Break-glass may only `WidenCouncil` / `Decorrelate` / recompose kernel membership to restore a quorum-capable, diversity-floor-passing council (§5.1). It cannot be used to push ordinary work.
+   - **Audit trail.** A break-glass recompose is recorded as a **distinguished signed `Commit`** on the DAG carrying the founder-threshold signatures, the triggering deadlock evidence, and the prior/after council composition — fully replayable and flagged to [`07`](./07-observability.md) for review. It is the most heavily audited commit type in the system.
+   - **Re-enters burn-in.** A break-glass (or any) recompose resets the affected members' `samples` and re-opens the **burn-in window** (§6.6), so autonomy is re-restricted to high-verification-coverage proposals until the new council calibrates.
+
+The break-glass path is the actuator that closes ROB-04: council repair has a route that does not require the broken council to consent to its own repair, while the dual gate (founder threshold + bounded human escalation + heavy audit) keeps it from becoming a governance backdoor.
 
 ---
 
@@ -647,15 +725,15 @@ Votes are scored against a **three-tier** ground-truth signal (§6.2):
 - **G1** — the *downstream consequence within a bounded horizon* (via [`04`](./04-runtime-and-harness.md), [`07`](./07-observability.md)).
 - **G2** — *user feedback*; **optional and lagged**, sometimes never arriving (via [`06`](./06-interaction-and-mailbox.md)).
 
-A vote is scored on **whatever tier has arrived**, applying a **staleness discount** as credit ages. A **never-arriving G2** does not block scoring — the vote is scored on **G0/G1 only, at lower weight**. **Credit assignment** back to the originating proposal follows the **causal trace-id chain** ([`07`](./07-observability.md)) with **eligibility-trace decay** over the commits that intervene between the proposal and the resolved outcome.
+A vote is scored on **whatever tier has arrived**, applying a **staleness discount** as credit ages. A **never-arriving G2** does not block scoring — the vote is scored on **G0/G1 only, at lower weight**. **Credit assignment** back to the originating proposal follows the **causal trace-id chain** ([`07`](./07-observability.md)) with a **simple decay** over the commits that intervene between the proposal and the resolved outcome — *not* an eligibility-trace mechanism (OE-05). All scoring is over the **machine-measurable subset** of ground truth; the resulting scalar is the §6.1 track-record weight, nothing stronger.
 
 ### 11.2 Aggregation is a correlation-discounted, reputation-weighted log-odds pool
 
 The posterior (§8.1) is a **reputation-weighted log-odds (naive-Bayes) pool**, **discounted by an estimated correlation factor** so that correlated votes do not over-sharpen the posterior. The correlation factor derives from juror **descriptor similarity** (descriptor owned by [`04`](./04-runtime-and-harness.md), OQ6; see §11.4). The aggregator is **swappable behind an `Aggregator` trait**.
 
-### 11.3 Reputation update is proper-scoring + Bayesian beta + bounded slashing + decay
+### 11.3 Reputation is a scalar track-record weight decaying to a class prior (OE-05)
 
-The reputation update (§6.3, §6.4) is fixed as: a **proper scoring rule (log / Brier)** of `(verdict, confidence)` against ground truth; a **Bayesian beta-style update around a class prior** with **shrinkage** toward that prior on low samples; **bounded slashing** (no single event can zero an agent); and a **tunable decay half-life** regressing reputation toward the class prior without fresh evidence. Reputation **acquisition** for a newly-instantiated agent is **class-prior-with-decay** (locked in [`08`](./08-trust-and-security.md)).
+Reputation is fixed as a **single scalar track-record weight in `[0,1]`** (§6.1), updated by a **bounded prior-reverting nudge** toward/away from the class prior as machine-measurable ground truth arrives, and a **tunable decay half-life** regressing it toward the class prior without fresh evidence (§6.3). Track-record **acquisition** for a newly-instantiated agent is **class-prior-with-decay** (locked in [`08`](./08-trust-and-security.md)). Explicitly **dropped** as over-fitted to a 5–7-voter / lagged-ground-truth regime: proper-scoring-rule confidence training, beta-Bayesian shrinkage as the mechanism, eligibility-trace credit assignment, and weight-based slashing. **Hard off-protocol behavior is detected mechanically and quarantined via quorum / human escalation (§6.5), not through the learned weight**, and the weight's claim is narrowed to the **machine-measurable subset** of ground truth (§6.1).
 
 ### 11.4 Diversity is correlation-matrix-minimizing, competence-floored, slow control
 
@@ -688,6 +766,18 @@ The protocol ships the following **defaults table**; every entry is **tunable** 
 
 The **small-`n` coarseness** is noted: at `n = 5–7`, the ⅔/¾ thresholds are coarse-grained. Empirical values remain workload-dependent tuning (§12b).
 
+### 11.9 The write path is tiered by blast radius (UX-03)
+
+Full council consensus is **reserved for high-blast-radius / irreversible / constitutional** proposals (§9.1, §9.2). **Routine, reversible advances** — worker spawns, progress-layer updates, routine wiring — proceed under **single-Guardian authority with post-hoc audit** and **optimistic concurrency on the head**, with **no blind-vote council round** (§9.4). Tier assignment is **mechanical**, driven by the reversibility predicate (owned by [`01`](./01-state-model.md); unknown ⇒ not Routine ⇒ escalate) and a blast-radius bound — not by the authoring Guardian's discretion.
+
+### 11.10 Burn-in / cold-start gates autonomy on verification coverage (ROB-03)
+
+At **genesis and after every council recomposition**, track-record weights shrink to the class prior, so the council is effectively a flat-headcount majority of uncalibrated jurors. During this **burn-in window**, **autonomous commits are restricted to high-verification-coverage proposals**, and **low-coverage / high-blast-radius decisions route to human escalation** (§6.6). Every recomposition (including break-glass, §10.4) re-enters burn-in.
+
+### 11.11 Independence is measured, and council deadlock has a break-glass recovery (ROB-02, ROB-04)
+
+A quorum is treated as **independent** only when its **measured base-model / harness diversity clears a floor** (§5.1, §10.2); a diversity-floor miss is handled like a quorum miss for high-blast-radius proposals. High-blast-radius proposals additionally require a **decorrelated red-team lane from a different model population** (§5.1, ROB-01). Council **self-repair** has a recovery path that does **not** route through the broken quorum (§10.4): **human escalation as a first-class recovery** plus a **founder-threshold break-glass recompose** with specified authority, threshold, trigger, and audit trail. The headline fault-tolerance posture is **mitigated, not guaranteed — correlated failure is the headline residual risk** (§2.4).
+
 ---
 
 ## 12. Open questions & ambiguities
@@ -696,9 +786,9 @@ Parked, not solved. After the §11 review, these are the *only* genuine research
 
 | # | Question | Why it's hard / parked |
 |---|----------|------------------------|
-| **(a) — Exact correlation-aware aggregation formula** | Given the committed correlation-discounted log-odds pool (§11.2), what is the *precise* functional form of the correlation discount in `aggregate` (§8.1)? | Naive-Bayes is only *approximate*: Lever 2 reduces but never zeroes inter-juror correlation, so independence is imperfect and a naive pool still over-sharpens. The right discount depends on the §11.4 correlation estimates and is a research problem. |
-| **(b) — Empirical reputation/consensus constants** | The concrete numeric values behind §11.3 and §11.8: learning rate, prior strength, shrinkage and decay half-lives, slashing magnitudes, `split_margin`, `round_deadline`, `quorum_weight`, `convergence_eps`, council size. | All are "defaults, tunable"; their right values are **empirical and workload-dependent**, and some interact (small *n* makes ⅔ coarse-grained; too-aggressive slashing can silence a council, too-soft lets drifters persist). |
-| **(c) — Persistent structural splits beyond escalation** | The deadlock *response* is settled (tiered-by-blast-radius, §11.6), but if a class of proposals *reliably* escalates — the council is **structurally** split and the user keeps punting — does this need a **higher-level [`03`](./03-control-loop.md) controller response** beyond escalation? | Escalation is the safe default but is not a *resolution*; persistent structural escalation is a **liveness pathology** that likely needs a PID-controller-level response, not a consensus-level one — a research question co-owned with [`03`](./03-control-loop.md). |
+| **(a) — Correlation-aware vote aggregation** | Given the committed correlation-discounted log-odds pool (§11.2), what is the *precise* functional form of the correlation discount in `aggregate` (§8.1)? *(This is the project README's "correlation-aware vote aggregation" open question, now tracked here per ROB-02 rather than only in the README.)* | Naive-Bayes is only *approximate*: Lever 2 reduces but never zeroes inter-juror correlation, so independence is imperfect and a naive pool still over-sharpens. The right discount depends on the §11.4 correlation estimates and is a research problem. **Correlated failure is the headline residual risk** (§2.4): at `n = 5–7` the council is far from CJT's asymptotic regime, and a *novel* correlated failure has no track record to down-weight against (§6) — the measured diversity floor (§5.1) and the cross-population red-team lane (ROB-01) mitigate but do not close this. |
+| **(b) — Empirical reputation/consensus constants** | The concrete numeric values behind §11.3 and §11.8: the track-record class prior, the bounded nudge step size, the decay half-life, the burn-in `samples` floor and diversity floor (§5.1, §6.6), `split_margin`, `round_deadline`, `quorum_weight`, `convergence_eps`, council size. | All are "defaults, tunable"; their right values are **empirical and workload-dependent**, and some interact (small *n* makes ⅔ coarse-grained; too-large a nudge step whipsaws the weight, too-small lets drifters persist). |
+| **(c) — Persistent structural splits beyond escalation** | The deadlock *response* is settled (tiered-by-blast-radius, §11.6), but if a class of proposals *reliably* escalates — the council is **structurally** split and the user keeps punting — does this need a **higher-level [`03`](./03-control-loop.md) controller response** beyond escalation? | Escalation is the safe default but is not a *resolution*; persistent structural escalation is a **liveness pathology** that likely needs a steering-loop-level response, not a consensus-level one — a research question co-owned with [`03`](./03-control-loop.md). |
 
 ---
 
@@ -708,9 +798,9 @@ Parked, not solved. After the §11 review, these are the *only* genuine research
 |------|-------------|
 | [`00-overview.md`](./00-overview.md) | **Anchor.** Source of all canonical types (`Proposal`, `Vote`, `Decision`, `Commit`, `WorldModel`, `ErrorVector`, `Reputation`, `AgentId`, `Signature`), the five planes, the agent taxonomy (proposer ≠ voter), the seven design principles, and the ⅔/¾ thresholds. This spec elaborates principles §6.1–6.4 into the layered protocol. |
 | [`01-state-model.md`](./01-state-model.md) | **Reads & writes.** Consumes the `WorldModel` head and the `TypedDiff`/`Layer` schemas; the only writer of `Commit`s to the Merkle DAG. Verification (§4.2) checks invariants defined there; the constitutional classifier (§9.2) keys off the kernel-membership region of the `Configuration` layer. (Spec not yet authored; this doc relies on the anchor's `Commit`/`WorldModel` shapes meanwhile.) |
-| [`03-control-loop.md`](./03-control-loop.md) | **Downstream consumer + upstream source.** Emits `Decision.dispersion` as `ErrorVector.divergence` (§8.3). Receives control-action-derived proposals (`Proposal.derived_from`). Owns council recomposition as a slow control surface (§11.4) and the low-stakes deadlock response (§11.6); co-designs the dispersion measure (§11.5); the persistent-structural-split pathology is the open item §12c. |
+| [`03-control-loop.md`](./03-control-loop.md) | **Downstream consumer + upstream source.** Emits `Decision.dispersion` as `ErrorVector.divergence` (§8.3) — consumed *together with* verification coverage, since low dispersion alone is not health (ROB-01). Receives control-action-derived proposals (`Proposal.derived_from`). Owns council recomposition as a slow control surface (§11.4) and the low-stakes deadlock response (§11.6); co-designs the dispersion measure (§11.5); council-deadlock break-glass is co-owned (§10.4); the persistent-structural-split pathology is the open item §12c. |
 | [`04-runtime-and-harness.md`](./04-runtime-and-harness.md) | **Ground-truth source (G1) + descriptor owner.** After a `Commit`, the `ExecutionBackend` reconciles toward the new desired state; execution outcomes feed reputation (§6.2 G1). Owns the juror descriptor `{tool, version, model_family, scaffold, prompt_template_hash}` (OQ6) that this spec's correlation estimation (§11.4) keys off. |
 | [`05-agent-jit.md`](./05-agent-jit.md) | **Boundary co-evolution.** Compilers may promote formerly-subjective judgments into deterministic verification checks; such promotion is itself a governed proposal under this protocol (§11.7), moving the §4.2 line over time. |
 | [`06-interaction-and-mailbox.md`](./06-interaction-and-mailbox.md) | **Author + escalation sink + ground-truth source (G2).** Guardians author proposals (§4.1); persistent splits and quorum failures escalate to the user via the mailbox (§7.4, §10.2); user feedback is the highest-authority ground truth (§6.2 G2). |
-| [`07-observability.md`](./07-observability.md) | **Telemetry.** Vote latencies, dispersion, posterior, reputation trajectories, quorum stalls, and equivocation events are emitted to the Observability plane; Sentinels feed off-protocol slashes (§6.3). |
-| [`08-trust-and-security.md`](./08-trust-and-security.md) | **Identity & threat model.** Owns the signing scheme, `AgentId`/key custody, equivocation forensics & eviction (§10.3), and the adversarial-minority threat model that §2.4 defers to. This spec *references* it; it does not duplicate it. |
+| [`07-observability.md`](./07-observability.md) | **Telemetry + verification-coverage owner.** Vote latencies, dispersion, posterior, track-record trajectories, quorum stalls, and equivocation events are emitted to the Observability plane. Owns the **verification-coverage** signal that gates burn-in autonomy (§6.6) and that must be read alongside dispersion (§8.3, ROB-01); audits Routine-tier commits (§9.4); Sentinels feed mechanical off-protocol events (§6.5). |
+| [`08-trust-and-security.md`](./08-trust-and-security.md) | **Identity & threat model.** Owns the signing scheme, `AgentId`/key custody, equivocation forensics & eviction (§10.3), the **threshold-of-founders trust root** the break-glass recompose relies on (§10.4), and the adversarial-minority threat model that §2.4 defers to. This spec *references* it; it does not duplicate it. |

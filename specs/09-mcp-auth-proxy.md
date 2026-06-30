@@ -296,8 +296,9 @@ The proxy must stay in sync with two streams from Metatron, both **derived from 
 2. **Fast revocation list (hot path).** The proxy **polls** a frequently-updated revocation list so that an agent quarantined or emergency-revoked by `08`'s Byzantine response (`08 §3.6`, Open Q #1/#9) **stops being honored within one short SVID TTL** — without waiting for SVID expiry and without any downstream rotation.
 
 ```rust
-/// Polled at a short interval (≪ SVID TTL). Fail-safe: on staleness, the proxy treats
-/// the list as authoritative until a fresh fetch, and MAY fail closed (§3.9).
+/// Polled at a short interval (≪ SVID TTL). Fail-safe: on staleness the proxy honors the
+/// last-known-good list within a bounded grace window; recorded revocation always fails
+/// closed, mere staleness does not (staleness ≠ revocation, §3.9).
 struct RevocationList {
     version: Hash,
     as_of: LogicalTime,
@@ -376,7 +377,7 @@ But "safe default" must not mean "Metatron crashes." Two requirements follow:
 - **Metatron MUST degrade gracefully when the proxy is unreachable.** A Worker that needs an external action **blocks** on that call rather than crashing or busy-failing. The block is **surfaced via `07`** — exactly like the mailbox-block pattern in `00 §5`/`06`, where affected work blocks until answered. The blocked external call:
   - emits an `ExternalCallBlocked` event/span on the causal chain (`§3.10`), so the stall is observable, not silent;
   - feeds the **`latency`** dimension of the `ErrorVector` (`03`) via that span's duration, so the control loop *sees* external unavailability as pressure and can react (re-plan, back off, escalate to the user via the mailbox);
-  - resumes when the proxy returns, or fails the task cleanly on timeout — never corrupts state, because (per `08 §3.5`/`02`) nothing enters the system of record except through the typed/verified/voted/signed gate.
+  - **never blocks indefinitely.** The wait is bounded by the **uniform escalation-timeout** (the shared human-block policy of `02`/`06`, `CONV-E`): on expiry the call **holds and degrades safely** — the task fails cleanly and the stall is mailbox-escalated to the user (`06`) — and it **never silently proceeds** on an irreversible external action. State is never corrupted, because (per `08 §3.5`/`02`) nothing enters the system of record except through the typed/verified/voted/signed gate, so a clean failure is always safe; resumption happens only if the proxy returns within the window.
 
 ```
    Worker needs external action
@@ -385,13 +386,29 @@ But "safe default" must not mean "Metatron crashes." Two requirements follow:
    proxy reachable & healthy? ──no──▶ BLOCK (do not crash)
         │ yes                              │  emit ExternalCallBlocked → 07 (causal chain)
         ▼                                  │  duration → ErrorVector.latency (03)
-   broker the call (§3.5)                  │  PID may re-plan / mailbox-escalate (06)
+   broker the call (§3.5)                  │  steering loop may re-plan / mailbox-escalate (06)
         │                                  ▼
         ▼                            proxy returns ──▶ resume   |   timeout ──▶ clean task failure
    McpResult                                                        (state never corrupted)
 ```
 
 This makes external unavailability a *measured error*, consistent with `00 §6` principle 5 ("close the loop, measure the error"), rather than an unhandled fault.
+
+**Staleness is not revocation.** Fail-closed is the correct response to *revocation*; it is the **wrong** response to mere *staleness*. The proxy's authorization inputs — the `PolicyBundle` and the revocation list — are projected from the consensus-governed head (`§3.7`). If the council stalls (no quorum — e.g. a self-repair deadlock, `ROB-04`), the head stops advancing; naïvely validating every minutes-lived SVID against the **current advancing head** would then expire all credentials within one TTL and **amputate all external action at the worst possible moment** — including the very tools an operator needs to diagnose and recover. The gateway therefore separates the two cases explicitly:
+
+- **Genuine revocation/quarantine** — an `AgentId`/serial recorded on the last-known-good revocation list as an **explicit decision in governed state** (`08 §3.6`) — **always fails closed**, immediately, regardless of head freshness. A stall must never weaken containment of an agent already known to be revoked.
+- **Mere staleness** — the head (and thus the policy bundle / revocation list) has simply stopped advancing — is **not** treated as revocation. The proxy validates against the **last-known-good head** within a **bounded staleness grace window** (`grace_window`, operator-configured, `always ≥ one SVID TTL` so a single missed refresh cannot strand an agent). Within the window, SVIDs that were valid against the last-known-good head keep being honored even past their own `not_after`, **provided** the agent is not on the last-known-good revocation list.
+
+```rust
+struct StalenessPolicy {
+    grace_window: LogicalTime,   // honor last-known-good head this long past head freeze (≥ one SVID TTL)
+    recovery_safe_unbounded: bool, // keep brokering the recovery/diagnostic carve-out beyond grace_window
+}
+```
+
+**Security trade-off (stated).** The grace window trades a *bounded* extension of an agent's external reach for availability during a governance liveness failure, and the cost is precisely bounded: for at most `grace_window` after the head freezes, an agent that *would have been* revoked by a decision that **never reached quorum** keeps its prior authorization — but any agent revoked **before** the freeze stays cut off (revocation state is last-known-good, never reset). Past `grace_window` with no fresh head, the proxy reverts to fail-closed: staleness that outlives the window is treated as a genuine loss of policy currency.
+
+**Diagnostic-tool carve-out.** A small, explicitly-tagged set of recovery/diagnostic tools (`DangerClass::Normal`, marked recovery-safe in the policy bundle — e.g. read-only health/status queries and the operator escalation/mailbox path) remains brokerable **beyond** `grace_window` under the last-known-good policy, so recovery tooling stays usable while the head is frozen. The carve-out is **read-mostly and reversible by construction** (no irreversible external effect, `CONV-D`); irreversible tools never qualify, so the carve-out cannot be turned into a bypass.
 
 ### 3.10 Audit: every brokered call is on the causal chain
 
@@ -411,16 +428,26 @@ struct BrokeredCallAttrs {
     scope_used: Scope,              // the Layer-1 scope that authorized it
     server: McpServerId,            // downstream target
     tool: ToolName,                 // the tool invoked
-    arg_digest: Hash,               // content hash of arguments (not the raw args — privacy)
+    args_redacted: RedactedArgs,    // field-redacted STRUCTURED args — reconstructs *what* was done for forensics
+    arg_digest: Hash,               // integrity/tamper-evidence companion: content hash over the ORIGINAL args (alongside, not instead of, args_redacted)
     outcome: BrokerOutcome,         // Ok | Denied{reason} | DownstreamError{code} | Blocked | Timeout
     dlp_applied: bool,              // was the return path filtered?
     latency_ms: u64,
 }
+
+/// The call's structured arguments after field-level redaction, produced by the SAME
+/// DLP policy DSL (DlpPolicy, §3.4/§3.5) that governs the return path — no second
+/// redaction language. Sealed under the gateway's existing DLP/encryption machinery;
+/// readable only by authorized incident forensics, never reachable by an agent (R3).
+struct RedactedArgs { dlp_version: Hash, args: JsonValue }
+
 enum BrokerOutcome { Ok, Denied(DenyReason), DownstreamError(u16), Blocked, Timeout }
 enum DenyReason { OutOfScope, PolicyGuardFailed, Revoked, SvidExpired, UnknownTool, StepUpRequired }
 ```
 
 How it joins the chain (`07 §2.3`): each brokered-call event carries the `Correlation` of the work that triggered it — `instruction`, `goal`, `trace`, `episode`, and the `commit`/`proposal` that authorized the underlying task. A single query "show me every external action taken because of instruction I42" walks `InstructionId → … → {BrokeredCallFinished}` and returns every privileged action, its authorizing scope, its downstream target, and its outcome — the operational meaning of "privileged actions are first-class monitored." Spine-grade brokered-call events are **signed** (`07 §4.1` `signature`) so the external-action audit log is itself tamper-evident, and **never sampled** (`07 §3`) — dropping a record of a privileged action is not permitted.
+
+**Replayable arguments, redacted — not just a digest.** Incident forensics must be able to reconstruct *what* a privileged call actually did — which repo, which amount, which recipient — not merely prove that *some* call happened. The audit therefore records the call's **structured arguments with field-level redaction** (`args_redacted`), produced by the **same `DlpPolicy` DSL** (`§3.4`/`§3.5`) that governs the return path — **reusing** that machinery rather than introducing a second redaction language — and sealed under the gateway's existing DLP/encryption. Secrets and high-sensitivity fields are masked exactly as they would be on the return path, so the privacy concern that originally motivated a digest-only record is handled by *redaction*, not by blinding the record. The `arg_digest` is **retained alongside** as an integrity/tamper-evidence companion — a content hash over the *original* arguments that lets an investigator confirm the redacted view corresponds to what was actually sent — **not** a replacement for it. An auditor can thus both read the (redacted) blast radius of a breach and verify the record was not tampered with.
 
 The proxy's audit emission is **non-blocking to the call path** (`07 §3`): the broker never stalls waiting on telemetry, but every brokered call *is* accounted (a dropped audit emits a `TelemetryGap`, never a silent omission).
 
@@ -514,8 +541,10 @@ trait RevocationFeed { fn poll(&self) -> Result<RevocationList, FeedError>; }
 // ── Audit (§3.10) — additive to 07's catalog; same envelope & correlation ─────
 struct BrokeredCallAttrs {
     agent: AgentId, svid_serial: SvidSerial, scope_used: Scope, server: McpServerId,
-    tool: ToolName, arg_digest: Hash, outcome: BrokerOutcome, dlp_applied: bool, latency_ms: u64,
+    tool: ToolName, args_redacted: RedactedArgs, arg_digest: Hash,   // redacted structured args + integrity companion (§3.10)
+    outcome: BrokerOutcome, dlp_applied: bool, latency_ms: u64,
 }
+struct RedactedArgs { dlp_version: Hash, args: JsonValue }   // field-redacted via the return-path DLP DSL (§3.4/§3.5); sealed under DLP/encryption
 ```
 
 ### 4.1 Threat model (extends `08 §4.1`)
@@ -530,7 +559,7 @@ Each row is **vector → impact → mitigation**; the mitigation is the architec
 | **P4** | **Forged or replayed SVID** | Attacker presents a fabricated or stale SVID. | Impersonation; expired authority reused. | Federation verification of `issuer_sig` against the trust bundle, `not_after` + `max_svid_ttl` bound, mTLS bound to `operational_key`, self-certifying `agent_id` (`§3.8`); short TTL bounds replay window. |
 | **P5** | **Revoked agent keeps acting** | Quarantined/removed agent (`08 §3.6`) still holds an unexpired SVID. | Continued external action after internal containment. | **Fast revocation list**, polled ≪ SVID TTL; the proxy stops honoring the agent within one TTL with **no downstream rotation** (`§3.7`). |
 | **P6** | **Proxy outage used to force unsafe fallback** | Proxy unreachable; pressure to "let agents call directly" as a workaround. | Re-introduction of standing secrets / unbrokered action. | **Fail-closed**: no proxy ⇒ no privileged action; Metatron **blocks** (graceful degradation, `§3.9`). There is no direct-call fallback path by construction. |
-| **P7** | **Data exfiltration via the return path** | Downstream result carries secrets/PII the agent shouldn't see. | Sensitive data leaks into agent context / telemetry. | Optional **DLP/response filtering** governed by the same policy (`§3.4`/`§3.5`); audit records `dlp_applied`; `arg_digest` (not raw args) in telemetry (`§3.10`). |
+| **P7** | **Data exfiltration via the return path** | Downstream result carries secrets/PII the agent shouldn't see. | Sensitive data leaks into agent context / telemetry. | Optional **DLP/response filtering** governed by the same policy (`§3.4`/`§3.5`); audit records `dlp_applied` and stores **DLP-redacted structured args** (not raw args) plus an integrity `arg_digest` in telemetry (`§3.10`). |
 | **P8** | **Proxy (vault) compromise** | The proxy itself — the one secret-holder — is breached. | All downstream secrets exposed. | Concentrates risk into one **user-owned, hardenable** boundary (HSM/KMS-backed vault, `§3.6`) rather than spreading standing secrets across N agents; separate trust domain from Metatron core (`§3.8`); least-privilege downstream credentials limit each one's reach. (Residual trust assumption — `§6`.) |
 | **P9** | **Confused-deputy across users (multi-user)** | An action serving external user A is brokered with user B's credential/vault. | Cross-tenant privilege confusion. | Routing/vault selection must bind to the acting principal; **multi-user vault selection is an Open Question** (`§6`), flagged not closed. |
 
@@ -543,7 +572,7 @@ Each row is **vector → impact → mitigation**; the mitigation is the architec
 - **Health & fail-closed posture.** Each replica tracks `ServerHealth` per downstream and `CredentialStatus` per credential. On its own unavailability, a stale revocation list past `ttl`, or a missing/expired credential, it **denies/blocks** rather than guesses — fail-closed is the default everywhere.
 - **Policy & revocation freshness.** Operators tune the revocation poll interval to be **≪ the SVID TTL** so containment latency stays within one TTL. Policy bundles are content-addressed to a governing commit (`§3.4`), so an operator can always answer "which consensus decision authorized this privilege?"
 - **Configuration surface.** Per deployment: the `FederationConfig` (trust domain, bundle, `max_svid_ttl`); the `RoutingTable` (downstream endpoints + `CredentialRef`s + `auth_kind`); the vault backend; the `PolicyBundle` source; the `RevocationFeed` endpoint and poll interval; the telemetry sink (`07`).
-- **Observability of the proxy itself.** The proxy is a `07` producer (`§3.10`): brokered-call spine events are signed and unsampled; its own outages surface as `ExternalCallBlocked` on agents' causal chains and as `latency` pressure to the PID loop (`03`). A silent proxy is detectable the same way a silent Sentinel is (absence of expected spans, `07 §3`).
+- **Observability of the proxy itself.** The proxy is a `07` producer (`§3.10`): brokered-call spine events are signed and unsampled; its own outages surface as `ExternalCallBlocked` on agents' causal chains and as `latency` pressure to the steering loop (`03`). A silent proxy is detectable the same way a silent Sentinel is (absence of expected spans, `07 §3`).
 - **Credential lifecycle ops.** OAuth refresh/expiry is handled inside the proxy (`§3.6`); operators rotate downstream secrets in the vault **without touching any agent** — agents are credential-free, so downstream rotation is invisible to them.
 
 ---
@@ -552,11 +581,11 @@ Each row is **vector → impact → mitigation**; the mitigation is the architec
 
 Parked per `00 §9`. Genuine, deferred decisions — not yet settled.
 
-1. **HA topology & graceful-block mechanics.** What replica/affinity topology best serves a gateway that must be HA *and* carry streaming, long-running, and resumable downstream sessions (which resist statelessness)? And precisely how does a Worker *block* on an unreachable proxy without wedging the execution backend — bounded queue + timeout? backpressure into the PID `latency` signal (`03`)? mailbox-escalation to the user (`06`) after a threshold? The fail-closed *intent* is locked (`§3.9`); the exact blocking/queueing/timeout mechanics and the replica model are open.
+1. **HA topology & graceful-block mechanics.** What replica/affinity topology best serves a gateway that must be HA *and* carry streaming, long-running, and resumable downstream sessions (which resist statelessness)? And precisely how does a Worker *block* on an unreachable proxy without wedging the execution backend — bounded queue + timeout? backpressure into the steering-loop `latency` signal (`03`)? mailbox-escalation to the user (`06`) after a threshold? The fail-closed *intent* is locked (`§3.9`); the exact blocking/queueing/timeout mechanics and the replica model are open.
 2. **Breadth of MCP-protocol coverage across heterogeneous downstreams.** Downstream MCP servers vary widely in what they implement — streaming, progress, cancellation, resumable sessions, resources/prompts beyond tools, transport (stdio vs http+sse vs ws). How much of the MCP surface must the proxy faithfully multiplex, and how does it degrade when a downstream supports less than the agent expects? A capability-intersection model is sketched (`§3.2`) but not pinned.
 3. **DLP / response-filtering policy language.** `§3.4`/`§3.5` introduce return-path DLP but leave the *language* open: how are redaction/masking/size-cap/block rules expressed (CEL? a typed predicate DSL? JSONPath matchers?), how are they governed as state, and how is their performance bounded on large/streamed results without becoming a latency sink?
 4. **Downstream OAuth refresh/expiry management.** The proxy manages token refresh internally (`§3.6`), but the strategy is undecided: proactive vs. lazy refresh, handling refresh-token rotation and revocation by the downstream IdP, behavior on a refresh failure mid-call (fail-closed vs. one bounded retry), and how `CredentialStatus::Expiring` feeds health-based routing.
-5. **Per-call step-up authorization for especially dangerous tools.** Should some tools (`DangerClass::Critical` — e.g. "delete production database", "wire funds") require a *per-call* elevation beyond standing scope — a fresh consensus decision, a second-agent co-sign, or a human mailbox confirmation (`06`) — rather than relying on the standing SVID scope? `StepUpPolicy` is reserved in the types (`§3.4`) but its trigger conditions, authority, and latency cost are unspecified.
+5. **Per-call step-up authorization for especially dangerous tools.** Should some tools (`DangerClass::Critical` — e.g. "delete production database", "wire funds") require a *per-call* elevation beyond standing scope — a fresh consensus decision, a second-agent co-sign, or a human mailbox confirmation (`06`) — rather than relying on the standing SVID scope? `StepUpPolicy` is reserved in the types (`§3.4`) but its trigger conditions, authority, and latency cost are unspecified. **One aspect is *not* open, however:** whatever mechanism is chosen, its human/consensus wait is **bounded by the uniform escalation-timeout** (the shared human-block policy of `02`/`06`, `CONV-E`) — it never blocks indefinitely. On expiry the call **holds and degrades safely**: it is denied (`DenyReason::StepUpRequired`) and the request is surfaced via the mailbox (`06`), and it **never silently proceeds** on a `DangerClass::Critical`/irreversible tool. The *bounded-wait-then-safe-fallback* contract is locked; only the trigger/authority/latency-budget choices are deferred.
 6. **Multi-user: whose vault/secrets when an action serves a specific external user?** When Metatron serves multiple external users (`06`/`08` Open Q #5) and a brokered action is taken *on behalf of* a particular user, which principal's credential/vault is used? Per-user vaults? A user-scoped `CredentialRef`? How does the acting agent's `AgentId` compose with the served user's identity to select the right secret without a confused-deputy (P9)? This is the deepest open question and interacts with external-user authentication, still deferred in `08 §5` #5.
 7. **Trust concentration in the vault (residual assumption).** Privilege separation deliberately concentrates *all* standing downstream secrets in one place (the proxy vault). That is a better posture than N agents each holding standing secrets (P8), but it makes the proxy a high-value target. How far to push hardening — HSM/enclave-backed vault, threshold-split credentials, per-downstream isolation — is an open operational/trust decision, parallel to `08`'s kernel-key-custody question (`08 §5` #8).
 8. **SVID issuance & rotation under load.** The identity-issuer (`§3.8`) extends `08`'s parked rotation/revocation question (`08 §5` #1). Issuing short-lived SVIDs for many agents at high rate, rotating the federation bundle without a brokering outage, and choosing the exact SVID TTL (containment latency vs. issuance load) are open.
@@ -568,7 +597,7 @@ Parked per `00 §9`. Genuine, deferred decisions — not yet settled.
 - **`00-overview`** — Canonical anchor. This spec reuses `AgentId`, `Hash`, `Signature`, `LogicalTime`, `PublicKey` verbatim and realizes `00 §1`'s "bound the blast radius of an unreliable substrate" at the external-action boundary. On any conflict, `00` wins.
 - **`01-state-model`** — The authorization that produces both SVID scopes (Layer 1) and the gateway `PolicyBundle` (Layer 2) is **derived from the consensus-governed configuration layer**; granting a privilege is a typed, consensus-approved state diff that lands as a signed `Commit`. Policy bundles are content-addressed back to their governing commit (`§3.4`).
 - **`02-consensus`** — Privilege grants/revocations are ordinary (or constitutional, for high-blast tools) proposals through the propose→verify→vote→commit loop. There is no privileged side channel to grant external access — consistent with `08 §3.4`'s "no privileged path."
-- **`03-control-loop`** — Proxy/downstream unavailability is a **measured error**: blocked external calls feed the `ErrorVector.latency` dimension (`§3.9`), and the PID loop can re-plan, back off, or mailbox-escalate. External action availability becomes a controlled variable, not an unhandled fault.
+- **`03-control-loop`** — Proxy/downstream unavailability is a **measured error**: blocked external calls feed the `ErrorVector.latency` dimension (`§3.9`), and the steering loop can re-plan, back off, or mailbox-escalate. External action availability becomes a controlled variable, not an unhandled fault.
 - **`04-runtime-and-harness`** — Workers' harnesses are the agents that broker calls. The proxy is the **enforcement point** for external `Net`/`Exec`-style privilege, complementing `08 §3.5`'s in-sandbox `CapabilitySet`: the harness has no ambient egress; its only privileged-action path is the single MCP endpoint at the proxy.
 - **`05-agent-jit`** — Tier-1/Tier-2 compiled policies broker external calls through the **same** proxy, SVID, two-layer authz, and audit as the Tier-0 interpreter; a deopt does not relax brokering. A compiled policy cannot self-grant a downstream credential any more than an interpreter can (`08 §3.5`).
 - **`06-interaction-and-mailbox`** — When an external action is blocked (`§3.9`) or a dangerous tool needs per-call confirmation (`§6` #5), the **mailbox** is the human-in-the-loop channel — the same blocking pattern as ambiguity (`00 §5`). Multi-user vault selection (`§6` #6) depends on `06`'s (deferred) external-user authentication.

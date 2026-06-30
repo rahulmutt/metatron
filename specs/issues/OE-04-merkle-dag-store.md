@@ -3,7 +3,7 @@ id: OE-04
 title: Hand-rolled Merkle DAG storage engine for a linear log
 severity: medium
 category: overengineering
-status: open
+status: resolved
 affected_specs: [01-state-model.md]
 review_verdict: SOFTENED
 ---
@@ -48,3 +48,20 @@ content-addressed signed-log model.
 - [ ] If bespoke is kept, the HAMT-vs-MST non-decision is resolved.
 - [ ] Three clocks (§ logical time) reduced to one counter + one human hint, or
       justified.
+
+## Resolution
+
+Adopt an off-the-shelf content-addressed store (git or a hash-chained append-only table)
+for the head. Keep the genuinely valuable parts — the typed-diff algebra and the
+invariant checks — and drop the bespoke store / GC / collection engine. Reduce the three
+logical clocks to one counter + one human hint.
+
+Rationale: the head is a serialized, single-writer linear log, so content-addressing,
+tamper-evidence, structural sharing, and per-path history come off the shelf; the bespoke
+HAMT/MST + path-copying + epoch GC + compaction + codec-replay machinery is unjustified
+correctness surface for a v0.1 design, and the unresolved "HAMT or MST" non-decision
+shows it was never load-bearing.
+
+Coverage: satisfies all three checks — the off-the-shelf store is adopted (which moots
+the HAMT-vs-MST non-decision rather than forcing it), and the clocks collapse to one
+counter plus a human hint.

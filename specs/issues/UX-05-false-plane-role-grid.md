@@ -3,7 +3,7 @@ id: UX-05
 title: Five planes / five roles invite a false 1:1 grid
 severity: low
 category: usability
-status: open
+status: resolved
 affected_specs: [00-overview.md]
 review_verdict: SOFTENED
 ---
@@ -34,3 +34,17 @@ five-item lists side by side.
 
 - [ ] 00 explicitly states planes and roles are not 1:1 and shows the real mapping.
 - [ ] Related: UX-06 (the shared AgentNode across planes), UX-01 (model clarity).
+
+## Resolution
+
+Break the plane/role symmetry explicitly in 00: state that planes and roles are different
+decompositions — one by concern, one by power — show the real mapping (the State plane
+has no owning role; the Execution plane has two, Worker + Compiler), and stop presenting
+them as parallel five-item lists side by side.
+
+Rationale: the symmetric five-and-five counts invite a false 1:1 grid the design then
+violates, so new readers build the wrong mental index and have to unlearn it. Naming the
+asymmetry up front prevents that.
+
+Coverage: satisfies the single acceptance check — 00 states planes and roles are not 1:1
+and shows the real mapping. The UX-06/UX-01 links are carried in those issues.

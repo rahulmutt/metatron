@@ -3,7 +3,7 @@ id: OE-05
 title: Reputation modeled as an adaptive-control economy for 5–7 voters
 severity: medium
 category: overengineering
-status: open
+status: resolved
 affected_specs: [02-consensus.md, 08-trust-and-security.md]
 review_verdict: SOFTENED
 ---
@@ -45,3 +45,20 @@ stateless LLMs, beta shrinkage), not to "track record influences weight."
       justified against a sample size and ground-truth-arrival argument.
 - [ ] Off-protocol detection vs. reputation slashing are separated (see ROB-06).
 - [ ] "Reputation = P(match ground truth)" claim narrowed to the measurable subset.
+
+## Resolution
+
+Replace the reputation economy with a scalar track-record weight in [0,1] that decays to
+a class prior. Separate mechanical, off-protocol detection (quarantine via quorum/human
+escalation) from reputation weighting, and narrow the "reputation = P(match ground
+truth)" claim to the measurable subset.
+
+Rationale: RL-grade estimation — eligibility traces, beta-Bayesian shrinkage, calibration
+training of stateless LLMs, bounded slashing — far outruns what a fixed population of 5–7
+voters and rarely-arriving ground truth can support, and the economy spawned its own
+attack surface (sleeper/Sybil/collusion). A scalar decaying weight keeps the worthwhile
+down-weighting of demonstrably-miscalibrated voters while shedding the machinery.
+
+Coverage: satisfies all three checks — reputation reduced to a scalar decaying weight,
+off-protocol detection split from reputation slashing (feeding ROB-06), and the
+ground-truth claim narrowed to what is measurable.

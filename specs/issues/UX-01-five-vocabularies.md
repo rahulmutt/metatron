@@ -3,7 +3,7 @@ id: UX-01
 title: Five expert vocabularies make the model un-teachable
 severity: high
 category: usability
-status: open
+status: resolved
 affected_specs: [README.md, 00-overview.md]
 review_verdict: CONFIRMED
 ---
@@ -43,3 +43,19 @@ demands five specialist vocabularies before the core is visible.
 - [ ] Each analogy is labeled with its load-bearing fraction.
 - [ ] A one-page minimal model exists.
 - [ ] Related: OE-01/03/04 (the heavy analogies), UX-02 (overloaded "reconciliation").
+
+## Resolution
+
+Lead 00/README with the small core in plain language, demote the four domain analogies
+(reconciliation, PID, JIT, jury) to skippable implementation framings each labeled with
+its load-bearing fraction, and add a one-page minimal mental model an engineer can hold
+before diving into any single domain spec.
+
+Rationale: the genuinely novel idea — a deliberative governor wrapped around
+reconciliation, with propose ≠ dispose and verify-before-vote — is small but buried under
+five expert vocabularies, so nothing can be skimmed and onboarding demands fluency in
+five fields. Surfacing the core first restores the stated "hold it in your head" goal.
+
+Coverage: satisfies all three checks — 00/README open with the core mechanism, each
+analogy is labeled with its load-bearing fraction, and a one-page minimal model exists.
+The OE-01/03/04 and UX-02 links are carried in those issues.

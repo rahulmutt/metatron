@@ -3,7 +3,7 @@ id: OE-01
 title: Multi-variable PID controller on an unmodelable plant
 severity: high
 category: overengineering
-status: open
+status: resolved
 affected_specs: [03-control-loop.md, 00-overview.md]
 review_verdict: SOFTENED
 ---
@@ -53,3 +53,20 @@ itself. Keep the loop; drop the unearned terms.
 - [ ] I, D, anti-windup, Ziegler–Nichols, and `Γ` are moved to "deferred until a
       measured oscillation demands them," or justified against an observed instability.
 - [ ] Related: ROB-01 (the error vector measures disagreement, not wrongness).
+
+## Resolution
+
+Reduce to the lean core: §03 now leads with a per-dimension proportional response over
+the normalized measured-error vector, gated by deadband + hysteresis + cooldown and a
+persistently-stuck counter. I/D terms, anti-windup, Ziegler–Nichols tuning, and the
+MIMO `Γ` matrix are moved to "deferred until a measured oscillation demands them."
+
+Rationale: on an unmodelable, nonstationary plant the full PID apparatus is mostly
+vocabulary — the anti-thrash behavior is actually delivered by the threshold logic, and
+the deferred terms can be reintroduced against an observed instability rather than
+shipped on faith.
+
+Coverage: satisfies both acceptance checks — the proportional + deadband/hysteresis/
+cooldown core leads, and the I/D/anti-windup/Ziegler–Nichols/`Γ` machinery is explicitly
+parked behind a measured-oscillation trigger. The ROB-01 cross-reference (the error
+vector measures disagreement, not wrongness) is carried in ROB-01's resolution.

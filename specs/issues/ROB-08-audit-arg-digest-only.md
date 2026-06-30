@@ -3,7 +3,7 @@ id: ROB-08
 title: Audit records only an arg-digest, defeating forensics
 severity: medium
 category: robustness
-status: open
+status: resolved
 affected_specs: [09-mcp-auth-proxy.md]
 review_verdict: CONFIRMED
 ---
@@ -37,3 +37,19 @@ digest-only design.
 - [ ] Audit records contain replayable, field-redacted structured args.
 - [ ] The digest is retained as an integrity/tamper-evidence companion.
 - [ ] Redaction policy reuses the existing DLP DSL rather than introducing a new one.
+
+## Resolution
+
+Store field-redacted structured arguments under the gateway's existing DLP/encryption
+machinery, and keep the digest alongside as an integrity companion (not a replacement).
+Reuse the existing DLP DSL for the redaction policy.
+
+Rationale: a digest proves a call happened but reveals nothing, defeating forensics for
+exactly the privileged actions — refunds, wires, production writes — the proxy exists to
+bound. Structured-but-redacted args restore the ability to reconstruct a breach's blast
+radius, while DLP handles the secrets-leakage concern that motivated the digest-only
+design.
+
+Coverage: satisfies all three checks — audit records carry replayable field-redacted
+structured args, the digest is retained as a tamper-evidence companion, and redaction
+reuses the existing DLP DSL.

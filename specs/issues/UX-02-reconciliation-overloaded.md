@@ -3,7 +3,7 @@ id: UX-02
 title: '"Reconciliation" names two different nested loops'
 severity: high
 category: usability
-status: open
+status: resolved
 affected_specs: [03-control-loop.md, 04-runtime-and-harness.md, 00-overview.md]
 review_verdict: CONFIRMED
 ---
@@ -44,3 +44,19 @@ owns convergence.
 - [ ] 03 and 04 adopt the distinction consistently.
 - [ ] Convergence ownership across the two loops is stated.
 - [ ] Related: UX-03 (governance loop as bottleneck), OE-01 (the steering controller).
+
+## Resolution
+
+Reserve "reconciliation" for the execution loop (matching reality to committed config)
+and rename the governance loop "the steering loop." State the nesting and convergence
+ownership explicitly: the execution loop owns reality → committed desired-state, and the
+steering loop owns desired-state → user target.
+
+Rationale: one word for two nested loops at different altitudes makes the reader unable to
+tell which loop a given guarantee, latency, or failure mode belongs to, and obscures who
+owns closing the gap. Distinct names plus an explicit ownership split remove the
+ambiguity.
+
+Coverage: satisfies all three checks — the 00 glossary distinguishes the two loops with
+separate terms, 03 and 04 adopt the distinction consistently, and convergence ownership
+across the two loops is stated.
