@@ -1,6 +1,6 @@
 {
   "name": "metatron",
-  "image": "ghcr.io/rahulmutt/dev:sha-36b3a16",
+  "image": "ghcr.io/rahulmutt/dev:sha-865174e",
   "workspaceFolder": "/workspace",
   "remoteUser": "dev",
   "containerEnv": {
