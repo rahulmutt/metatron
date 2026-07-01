@@ -234,6 +234,8 @@ struct KernelSet {
 
 Notably, `reputation` itself is *not stored inline* and is not part of what makes a config commit canonical — it is owned by `08`, changes on a different cadence, and is referenced advisorily so that reputation churn does not thrash the configuration history.
 
+**Budget allocations (`10`).** The `BudgetTree` — the governed global→class→agent cost-allocation hierarchy — is part of the configuration layer: allocations are ordinary typed diffs, versioned and governed like any other config change. Their *spend* counterpart is deliberately **not** here — measured consumption lives in the runtime accounting ledger (`07`) and is never written to the Merkle log. This keeps the desired(allocation)/actual(spend) split aligned with the rest of the model, so metering never touches the write path.
+
 ### 3.3 The progress layer in detail
 
 ```rust
