@@ -68,4 +68,14 @@ module reputation {
   val driftDecaysWeight =
     weight.keys().forall(a =>
       driftCount.get(a) >= DRIFT_LIMIT implies weight.get(a) <= DRIFT_WEIGHT_CAP)
+
+  // --- scenarios ---
+  // Decay-to-floor is REACHED, not just bounded: agent 1, observed wrong DRIFT_LIMIT
+  // times from START=4 (4 -> 2 -> 0 -> 0), lands at weight 0 with driftCount 3.
+  run chronicDriftReachesFloorTest =
+    init.then(observeWrong(1)).then(observeWrong(1)).then(observeWrong(1))
+        .then(all {
+          assert(weight.get(1) == 0 and driftCount.get(1) == DRIFT_LIMIT),
+          weight' = weight, driftCount' = driftCount,
+        })
 }
