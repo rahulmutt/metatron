@@ -72,6 +72,8 @@ A single scalar "health" score throws away the structure the controller needs. T
 
 - **Proportional (P):** react to the *current* gap. Big gap now → big push now. This is the active control law (§3.4).
 - **Persistently-stuck counter:** the one genuinely *accumulative* failure — a goal *slightly* stuck for a long time, a budget *steadily* creeping over — is caught by a per-dimension counter that increments while the dimension sits out of tolerance and trips an escalation when it crosses a threshold. This is a deliberately simple, interpretable stand-in for an integrator: it delivers "act on persistent error" without the windup, tuning, and stability burden a real integral term adds over a vetoing, lagging actuator.
+
+  A **sustained** `10` rate breach is exactly this kind of persistent error: a transient rate breach self-heals as the token bucket refills and does **not** escalate, but if throttling persists the counter trips and surfaces an `EscalateToUser` — the signal that a rate cap is mis-set or a runaway is sustained rather than spiky.
 - **Deferred — integral (I) and derivative (D):** a true integral (to drive steady-state error to zero) and a derivative (to act on *trend* and damp oscillation) are documented but **not active**. In this loop the integral over "stuck for a while" reduces to the counter above, and the derivative over noisy LLM-derived sensors filters down to near-zero; both are reintroduced only if a *measured* oscillation in the proportional version demonstrably requires them (§3.10).
 
 ### 2.3 Estimators and the measured signal
@@ -136,6 +138,8 @@ y_progress(k) = w_s · (closed_task_nodes / total_task_nodes)          // struct
 y_cost(k) = clamp01( cumulative_spend(k) / budget_ceiling )           // from 07 + 06 budget
             // spend in a common unit (tokens × price + wallclock × rate); see 07
 ```
+
+**Relationship to hard budgets (`10`).** This `cost` dimension is the *soft*, proportional signal layered **above** the hard stock caps of `10`. The caps are the safety floor the controller aims never to reach; `cost` does the smooth day-to-day steering (retire workers, prefer cheaper JIT tiers, narrow council). Hard-cap **enforcement** — pausing a depleted agent or throttling a rate breach — is owned by `10`, not by this controller.
 
 **`divergence` (dimension 2).** Fed *directly* by consensus dispersion (overview §7 note: "Dispersion … feeds steering-loop divergence"). Over a sampling window, aggregate the `dispersion` field of recent `Decision`s, optionally blended with a Sentinel-derived off-protocol rate (`05`/`08`).
 
@@ -290,6 +294,8 @@ The following classical-control machinery is **documented as a future upgrade pa
 **Gain tuning beyond conservative defaults (Ziegler–Nichols).** A per-loop **relay / step experiment** in simulation to find each loop's ultimate gain `Ku` and period `Pu`, then a Ziegler–Nichols-style (heavily backed-off) gain assignment. Deferred: v1 uses the conservative `Kp` defaults of §3.5 tuned offline / in shadow (§5.6); the relay experiment is only worth running once an oscillation in the proportional loop is observed and needs damping.
 
 **MIMO decoupling matrix `Γ`.** A non-trivial `Γ ∈ R^{D×D}` pre-compensation step `u' = Γ · u` (§3.6). At baseline `Γ = I` and cross-coupling is handled at the action layer and by council arbitration; a non-trivial `Γ` is adopted only if cross-coupling is *measured* to mis-steer the loop.
+
+**A `burn_rate` `ErrorVector` dimension (deferred).** `10` enforces per-node **rate** caps via token buckets — the enforcement complement to the burn-rate spikes this loop already reasons about (the motivation for the deferred derivative term). Promoting aggregate burn-rate to a first-class controlled dimension is deferred alongside the integral/derivative terms (OE-01), and adopted only if a measured need appears.
 
 ---
 
