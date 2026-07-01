@@ -82,6 +82,10 @@ module state_model {
   // is b in the reflexive-transitive dep-closure of a (bounded unfold). Top-level def:
   // nested fold/map lambdas. Reflexive: reaches(a, a) is always true (seed Set(a) contains a),
   // which is exactly what the addDep guard wants (it is only ever called with d != t).
+  // Coupling: the unfold depth (MAX_AGENTS + MAX_DEPTH) is sized for the current bounded
+  // state space (# VERIFY-STEP-MAX-STEPS: 4 above) — if MAX_AGENTS/MAX_DEPTH or the step
+  // bound is raised later, this bound must be re-checked or reachability will silently
+  // under-unfold and miss real dep chains.
   def reaches(a: int, b: int): bool =
     0.to(MAX_AGENTS + MAX_DEPTH).fold(Set(a), (acc, _) =>
       acc.union(acc.map(x => if (x.in(tasks.keys())) tasks.get(x).deps else Set()).flatten()))
@@ -101,7 +105,9 @@ module state_model {
 
   // --- invariants ---
   def ancestors(h: Hash): Set[Hash] =
-    // bounded unfold up to MAX_DEPTH
+    // bounded unfold up to MAX_DEPTH — sized for the current bounded max-steps; raising
+    // MAX_DEPTH (or the # VERIFY-STEP-MAX-STEPS bound above) requires re-checking this
+    // unfold depth too, or it will silently under-unfold and miss real ancestors.
     0.to(MAX_DEPTH).fold(Set(h), (acc, _) =>
       acc.union(acc.map(x => store.get(x).parent).filter(p => p >= 0)))
   val headReachable = 0.in(ancestors(headId))

@@ -52,7 +52,7 @@ module mailbox {
 
   // Is some OTHER (id != selfQ) question still ACTIVELY gating `node` — Open (awaiting an
   // answer) OR Closed (a high-stakes safe-hold from timeoutHighStakes, which retains the
-  // block by design, §3.7 line 132) — evaluated against the PRE-image `questions` map (i.e.
+  // block by design, 06 §2.4 line 132) — evaluated against the PRE-image `questions` map (i.e.
   // before the current transition's questions' update lands)? Needed by deliverAnswer below:
   // excluding selfQ matters because at guard-eval time selfQ's own qstate in `questions` is
   // still Open (its Answered update is only visible in questions').
@@ -122,7 +122,7 @@ module mailbox {
     bindingTable' = bindingTable, rank' = rank,
   }
 
-  // High-stakes bounded-timeout fallback (06 §3.7 / line 132): a high-stakes Question is
+  // High-stakes bounded-timeout fallback (06 §2.4 "Blocking-until-answered" / line 132): a high-stakes Question is
   // NEVER silently auto-defaulted. On escalation-window expiry the gated node "holds and
   // degrades safely" — it STAYS Blocked (never proceeds on the irreversible action) while
   // the Question resolves to a defined bounded fallback (Closed) rather than staying Open
@@ -242,7 +242,7 @@ module mailbox {
 
   // Liveness: a never-answering oracle on a high-stakes Question still reaches a bounded
   // fallback (Closed), never Open forever — and the gated node HOLDS (stays blocked =
-  // degrade-safely), never proceeding on the irreversible action (§3.7 line 132).
+  // degrade-safely), never proceeding on the irreversible action (06 §2.4 line 132).
   run neverAnsweredResolvesTest =
     init.then(askQuestion(1, 10, 1, true)).then(timeoutHighStakes(1))
         .then(all {

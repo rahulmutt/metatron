@@ -12,15 +12,18 @@ in `specs/` and reports back to them (see the design doc:
 
 ```
 specs/quint/
-  base.qnt              # canonical types from 00 (shared vocabulary) — not yet written
-  state_model.qnt        # 01 — Merkle log, typed diffs, CAS head        — not yet written
-  consensus.qnt          # 02 — 6-layer funnel, propose≠dispose, quorum  — not yet written
-  mailbox.qnt             # 06 — blocking mailbox, correlation tokens    — not yet written
-  budgets.qnt             # 10 — hierarchical stock+rate, layered stop   — not yet written
+  base.qnt              # canonical types from 00 (shared vocabulary) — written, verified
+  state_model.qnt        # 01 — Merkle log, typed diffs, CAS head        — written, verified
+  consensus.qnt          # 02 — 6-layer funnel, propose≠dispose, quorum  — written, verified
+  mailbox.qnt             # 06 — blocking mailbox, correlation tokens    — written, verified
+  budgets.qnt             # 10 — hierarchical stock+rate, layered stop   — written, verified
   smoke.qnt               # toolchain smoke test (this task)
   verify.sh               # runs `quint verify` over every module's declared invariants
   README.md               # this file
 ```
+
+All five modules above are implemented and green (typecheck + test + `quint verify`);
+see `FINDINGS.md` for the authoritative per-module status and per-invariant results.
 
 Coverage is the core governance spine: shared `base` (from `00`) plus four subsystem
 modules — `01` state-model, `02` consensus, `06` interaction/mailbox, `10` budgets.
