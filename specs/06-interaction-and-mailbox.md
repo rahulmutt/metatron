@@ -144,6 +144,14 @@ In both cases the Interaction plane is doing its job: translating an internal co
 
 **The deterministic budget notifier (`10`).** Budget-exhaustion escalations are special: they are raised by an **off-budget, non-LLM reflex** that emits a schema-validated `BudgetNotice` (a typed Mailbox item) computed entirely from the `07` ledger. It is self-funding (draws from no budget node) and un-forgeable (a drifting or compromised LLM cannot corrupt the message a funding decision rests on), debounced by the same deadband/hysteresis the steering loop uses. If reserved-floor budget remains, the Guardian LLM *additionally* enriches it — a guaranteed baseline plus best-effort context. The blocked work waits under the usual bounded escalation-timeout and then degrades safely; on top-up or reallocation it resumes.
 
+### 2.6 Channels — the pluggable external boundary
+
+Everything above describes the plane's *internal* contract: raw `Instruction`/`Answer` in, typed `Question`/`Notification` out, keyed by an abstract `ExternalUserId`. That contract is deliberately transport-agnostic. A **Channel** is a concrete way a user reaches the system — an HTTP API, Telegram, Slack, SMS — and a **Channel Adapter** is the translation shell that sits *outside* the Guardian and connects one such transport to the internal contract.
+
+The adapter occupies the same structural position for *user connection* that `AgentHarness` (`04`) occupies for *agent execution*: a pluggable boundary that maps one heterogeneous external world onto one canonical internal contract. Adding a channel is implementing an adapter; **the Guardian intake state machine (§3.1), the two-step gate (§2.3), goal normalization, and the mailbox (§3.3) do not change.**
+
+An adapter has three jobs: (1) **authenticate** the channel-native sender and **resolve** it to an `ExternalUserId` (via the binding table owned by `08`, §3.9); (2) **normalize inbound** channel-native events into a canonical `Instruction` — or, when the event correlates to an open `Question`, an `Answer`; (3) **render outbound** `Question`/`Notification` into channel-native form, best-effort and lossy, tracking a **correlation token** so any reply routes back to the exact `QuestionId` it answers. There is **no capability-negotiation handshake**: an adapter merely *declares* what it can do (`ChannelCapabilities`) and degrades gracefully.
+
 ---
 
 ## 3. Detailed design
@@ -273,6 +281,22 @@ A new Instruction may conflict with intent the user already expressed, or with a
 - **Large conflict → a proposal to revert.** The instruction contradicts committed progress so fundamentally that the right action is to undo it: author a **proposal to revert** (`02`) the offending committed state, which the Genesis council disposes of like any other proposal.
 
 **Cross-user precedence — deterministic, deadlock-free.** Cross-user conflicts on a *shared* goal use the same magnitude routing. To guarantee that two authorized principals can never *mutually deadlock* — each blocking on the other, or each holding a contradictory answer to the same shared Question (§3.6) — a **deterministic precedence order** breaks every tie: **(1) higher authorization rank wins** (the `rank` carried on each principal's `AuthorizationScope`, issued per `08`); **(2) on equal rank, first-committed-wins** — the instruction whose enclosing artifact reached an earlier `LogicalTime` boundary (`01`) prevails. This order is total and computable, so arbitration always terminates with a single winner rather than a standoff. The losing instruction is not discarded: it is surfaced to its submitter as a Notification and may re-enter as a fresh instruction. This precedence is a **liveness floor**, not the last word on *values*: a richer values-weighted arbitration policy may later refine *which* intent **should** prevail (§6), but it may only override the floor, never reintroduce a deadlock.
+
+### 3.8 Channel adapter data flow, rendering & correlation
+
+```
+inbound:  native event ──authenticate──▶ ExternalUserId ──ingest──▶ {Instruction | Answer} ──▶ Guardian (§3.1)
+outbound: Question/Notification ──render (lossy)──▶ native message  (+ correlation token for Questions)
+reply:    native reply ──match correlation token──▶ QuestionId ──▶ Answer ──▶ deliver_answer (§4.3)
+```
+
+**Inbound normalization.** The adapter turns a channel-native event into a canonical `Instruction`. If the event carries a correlation token for an open `Question`, it is instead ingested as an `Answer` to that `QuestionId` (the same one-channel-two-semantics rule as the API's `in_reply_to`, §4.4). Free text stays free text — normalization to a `Goal` remains the Guardian's job (§3.1), unchanged.
+
+**Outbound rendering is best-effort and lossy.** A `Question`'s structured `options` (§4.2) render as native controls where the adapter's `ChannelCapabilities.supports_structured_options` is true (Slack blocks, Telegram inline keyboards) and otherwise degrade to a numbered/keyword list the user answers in plain text. A channel with `supports_push == false` is polled by the client rather than pushed to. Degradation is the adapter's own concern; the Guardian emits one canonical `Question` regardless of channel.
+
+**Correlation is explicit, not threading-dependent.** Every rendered `Question` carries an adapter-managed `CorrelationToken`, so a reply on *any* channel maps unambiguously back to its `QuestionId` even when the channel cannot thread (e.g. SMS). Channel-native threading (Slack `thread_ts`, Telegram reply-to) may *inform* the token but is never the sole basis for correlation.
+
+**The correlation token is not an authorization credential.** It identifies *which* `Question` a reply answers; *who* may authoritatively answer is still the `08` `may_answer` scope check on the resolved `ExternalUserId` (§2.2, §3.6). A guessed or leaked token cannot answer another principal's blocking `Question`.
 
 ---
 
@@ -495,6 +519,59 @@ Answering is idempotent per `question_id`: a second answer to an already-`Answer
 
 **Setting budgets (`10`).** Through this surface a user sets or overrides the **stock** and **rate** budgets of any node they are authorized for — the global ceiling and, optionally, per-class / per-agent allocations. Budget setpoints follow the same strict-priority resolution as other setpoints (`03` §7.1): explicit user override → guardrailed learned refinement → safe default. Changes are enacted as tiered typed proposals (`02` §9.4).
 
+### 4.5 Channel adapters
+
+The external API surface of §4.4 is **one concrete adapter** (`ApiAdapter`) over a transport-agnostic contract, not *the* boundary. Every channel — API, Slack, Telegram, SMS — is an implementation of the `ChannelAdapter` trait below; the Guardian is unaware which adapter produced an inbound item or will deliver an outbound one.
+
+````rust
+type ChannelId = Hash;               // stable id of one configured channel instance
+
+enum ChannelKind { Api, Slack, Telegram, Sms, Other(String) } // extensible
+
+/// What an adapter can natively do. DECLARED, not negotiated (no handshake).
+struct ChannelCapabilities {
+    supports_structured_options: bool, // native buttons / quick-replies
+    supports_push: bool,               // server-initiated delivery vs poll-only
+    supports_threading: bool,          // native reply threading (advisory only)
+    max_message_len: Option<u32>,
+}
+
+/// An authenticated channel-native sender, PRE-resolution.
+/// Resolved to an ExternalUserId via the 08-owned binding table (08 §3.9).
+struct ChannelIdentity {
+    channel_kind: ChannelKind,
+    native_id: Text,      // Slack user id, Telegram user id, API token subject, …
+    auth_evidence: Bytes, // channel-native proof; VERIFIED by the adapter, checked per 08
+}
+
+/// Opaque, adapter-managed. Identifies WHICH Question a reply answers.
+/// NOT an authorization credential — answer-authz is the 08 `may_answer` check.
+struct CorrelationToken(Bytes);
+
+/// The channel-boundary contract. One implementation per ChannelKind.
+trait ChannelAdapter {
+    fn kind(&self) -> ChannelKind;
+    fn capabilities(&self) -> ChannelCapabilities;
+
+    /// Authenticate the native sender and resolve to a principal (via 08 binding).
+    /// Rejects unauthenticated / unbindable senders.
+    fn authenticate(&self, ev: &InboundEvent) -> Result<ExternalUserId, AuthReject>;
+
+    /// Inbound: native event -> canonical Instruction, or Answer if it carries a
+    /// CorrelationToken for an open Question.
+    fn ingest(&self, ev: InboundEvent, who: ExternalUserId) -> InboundItem; // Instruction | Answer
+
+    /// Outbound: render to native form. render_question mints a CorrelationToken
+    /// so the reply routes back to the Question's `gates` node.
+    fn render_question(&self, q: &Question) -> (NativeMessage, CorrelationToken);
+    fn render_notification(&self, n: &Notification) -> NativeMessage;
+}
+
+enum InboundItem { Instruction(Instruction), Answer(Answer) }
+````
+
+Authentication *mechanism* per channel (Slack request signing, Telegram webhook/bot-token secret, API OIDC/token) and the `ChannelIdentity → ExternalUserId` binding are owned by `08` (§3.9) and referenced, not redefined, here — exactly as §4.4 already defers authentication to `08`.
+
 ---
 
 ## 5. Resolved decisions
@@ -508,6 +585,7 @@ A design review resolved most of this plane's original open questions. The follo
 5. **The auto-resolve threshold is per-goal tunable and steering-loop-coupled.** Step 1's confidence threshold is set **per goal** and **tightened when divergence is already high** (coupled to the steering loop, `03`), trading user-interruption rate against silent-misinterpretation rate (relates to calibration in `08`).
 6. **A user Answer always wins over a late auto-resolution.** The human is authoritative: if an Answer races a late Step-1 auto-resolution on the same Question, the Answer is applied and any reversible auto-resolution is reverted in its favor (§3.4).
 7. **Instruction-vs-committed-state is routed by magnitude.** Small conflict → treat as an ambiguity (gate it, §2.3); medium → a new `Goal` version (setpoint step feeding `03`, §3.2); large → a proposal to **revert** (`02`). See §3.7.
+8. **The external boundary is a pluggable Channel Adapter.** The REST surface of §4.4 is **one concrete `ApiAdapter`** over a transport-agnostic contract; any channel (Slack, Telegram, SMS, …) is a `ChannelAdapter` implementation (§4.5) that authenticates a channel-native sender, resolves it to an `ExternalUserId` via the `08` binding table (§3.9), normalizes inbound events to `Instruction`/`Answer`, and renders `Question`/`Notification` best-effort with an explicit **correlation token**. Adapters **declare** capabilities (`ChannelCapabilities`); there is **no negotiation handshake** and the correlation token is **not** an authorization credential (§3.8). The core types and the Guardian state machine are unchanged.
 
 ---
 
@@ -517,6 +595,7 @@ Per `00` §9, the genuinely-open items are parked here, not silently decided. (M
 
 1. **Cross-user conflict arbitration *values* policy.** §3.7 now fixes both the *mechanism* (route by magnitude) and a **deterministic precedence floor** (authorization rank, then first-committed-wins) so the system can **never mutually deadlock**. What remains open is the *values* layer above that floor: whether a richer rule — explicit ownership, council adjudication, or a values-weighted scheme — *should* override the default precedence in some cases. Any such refinement must preserve the deadlock-free guarantee. **Governance/values-open.** Parked.
 2. **Calibrating the question-clustering threshold.** The conservative similarity threshold (§3.6) **bounds but does not eliminate** the false-merge risk of LLM-based clustering (two genuinely-different ambiguities merged, so one is answered wrong). Where exactly to set it is **empirical** — it must be tuned against observed false-merge and over-asking rates (`07`). Parked.
+3. **Cross-channel identity linking.** By default each `(channel_kind, native_id)` binds to its own `ExternalUserId` (§3.8, §4.5; binding owned by `08` §3.9), so the same human on Slack vs Telegram is two principals. The `ChannelIdentity → ExternalUserId` **indirection** makes it possible to later collapse several channel identities onto one principal **without changing the adapter contract**, but *when* and *how* to link — and whether per-channel trust should carry different authorization weight — is deferred. **Governance/identity-open.** Parked.
 
 ---
 
@@ -530,4 +609,4 @@ Per `00` §9, the genuinely-open items are parked here, not silently decided. (M
 | **`03-control-loop.md`** | The **Goal defines the setpoint/target state** the steering loop steers toward (§3.2). The Setpoint schema (§4.1) is produced here and consumed there. **Control-loop escalations** (infeasible goal, flatlined progress) surface through the Mailbox. Blocked nodes are reported to `03` as *stalled-by-design*, kept distinct from the `divergence`/`progress` error terms so blocking does not look like failure. |
 | **`04-runtime-and-harness.md`** | Workers (running under harnesses) are the most frequent *raisers* of `AmbiguityReport`s (§3.5). A raised ambiguity pauses that Worker's unit of work; the Answer/resolution resumes it. |
 | **`07-observability.md`** | The Mailbox logs (§3.3) and question lifecycle (§3.4) are a telemetry source: interruption rate, auto-resolve hit-rate, mean time-to-answer, and blocked-node counts are observability signals. Sentinels may watch for Guardians over-interrupting the user (a drift signal). |
-| **`08-trust-and-security.md`** | Owns external identity & authorization (§5 decision 2): how `ExternalUserId` authenticates, how its session binds, how per-user **authorization scopes** are issued, and how answer-authorization is checked — the external-vs-internal trust boundary. This plane *assumes* an authenticated `ExternalUserId` and resolved scopes and consumes them; `08` defines how they come to be. The Mailbox is the system's outermost trust boundary. |
+| **`08-trust-and-security.md`** | Owns external identity & authorization (§5 decision 2): how `ExternalUserId` authenticates, how its session binds, how per-user **authorization scopes** are issued, and how answer-authorization is checked — the external-vs-internal trust boundary. **Also owns the `ChannelIdentity → ExternalUserId` binding table (§3.9) that each Channel Adapter (§4.5) resolves through.** This plane *assumes* an authenticated `ExternalUserId` and resolved scopes and consumes them; `08` defines how they come to be. The Mailbox is the system's outermost trust boundary. |
