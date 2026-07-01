@@ -1,4 +1,4 @@
-// # VERIFY: weightBounded
+// # VERIFY: weightBounded, driftDecaysWeight
 module reputation {
   import base.* from "./base"
 
@@ -57,4 +57,15 @@ module reputation {
   // --- invariants ---
   val weightBounded =
     weight.keys().forall(a => 0 <= weight.get(a) and weight.get(a) <= CAP)
+
+  // A persistent drifter's weight is provably bounded by the derived ceiling. Because
+  // DRIFT_WEIGHT_CAP is DEFINED as max(0, CAP - DRIFT_LIMIT*DECAY), this holds by
+  // construction for any DECAY — it is a WELL-FORMEDNESS check (catches update-rule
+  // bugs: decaying the wrong agent, an off-by-one streak counter, a broken driftCount
+  // reset — a missing floor is weightBounded's job, not this one's). It
+  // does NOT by itself catch a mis-tuned decay RATE — that is swingResistance's job
+  // (Task 5). Deliberate division of labor (design §Invariants).
+  val driftDecaysWeight =
+    weight.keys().forall(a =>
+      driftCount.get(a) >= DRIFT_LIMIT implies weight.get(a) <= DRIFT_WEIGHT_CAP)
 }
