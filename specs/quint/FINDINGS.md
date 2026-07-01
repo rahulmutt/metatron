@@ -6,8 +6,12 @@ suite's report-back to the prose specs (see `specs/quint/README.md` and the desi
 for every model-checked invariant and every scenario test across all five modules:
 what was checked, against which spec section, by what method, and the result.
 
-**No `specs/*.md` prose body was edited to produce this report.** This file and the one
-new file under `specs/issues/` (§4 below) are additive-only.
+**The original report was additive-only** — no `specs/*.md` prose body was edited to produce
+it, and its only new file under `specs/issues/` was ROB-09 (§4 below). A subsequent
+**follow-up pass (2026-07-01, §9)** then closed out the two deferred items this report had
+flagged: it applied the ROB-09 clarification to `specs/06-interaction-and-mailbox.md` prose
+(§4) and tightened `detectDeadlock` in `consensus.qnt` (§6). Facts changed by that pass are
+updated in place below with an **_Update (follow-up):_** marker; §9 records the delta.
 
 ---
 
@@ -24,14 +28,15 @@ with every prior task report in this suite).
 
 ### 1.2 `mise run quint-test`
 
-Exit code 0. **28 test-invocations passing, 0 failing**, across 6 files (20 unique scenarios
-— `base`'s 2 scenarios are transitively re-run by every module that `import`s it):
+Exit code 0. **30 test-invocations passing, 0 failing**, across 6 files (22 unique scenarios
+— `base`'s 2 scenarios are transitively re-run by every module that `import`s it). _Update
+(follow-up):_ was 28/20 before the §9 pass added two consensus deadlock-gating scenarios.
 
 | Module | Passing | Breakdown |
 |---|---|---|
 | base.qnt | 2 | kernelClassificationTest, thresholdMathTest |
 | budgets.qnt | 6 | (2 inherited) + runawayWorkerRespectsKernelFloorTest, depletionAlwaysNotifiesTest, cannotSkipToCancelTest, reserveCarvedUnderCapTest |
-| consensus.qnt | 7 | (2 inherited) + refutedRejectsNoVoteTest, authorCannotVoteTest, ordinaryPassPathTest, correlatedCouncilCannotAutoCommitTest, breakGlassGatedTest |
+| consensus.qnt | 9 | (2 inherited) + refutedRejectsNoVoteTest, authorCannotVoteTest, ordinaryPassPathTest, correlatedCouncilCannotAutoCommitTest, breakGlassGatedTest, deadlockNeedsCompletedRoundTest, deadlockAfterFailedRoundEnablesBreakGlassTest |
 | mailbox.qnt | 6 | (2 inherited) + answerRoutesToOwnQuestionTest, leakedTokenRejectedTest, neverAnsweredResolvesTest, precedenceBreaksTieTest |
 | smoke.qnt | 1 | countsUpTest |
 | state_model.qnt | 6 | (2 inherited) + casSerializesTest (10000 randomized runs), cycleRejectedTest, blockedCannotFinishTest, i3EvasionRejectedTest |
@@ -43,7 +48,7 @@ Ran in the **background**, foreground-polled to completion (not backgrounded-and
 | # | Pass | Invariants | Depth | Outcome | Wall time |
 |---|---|---|---|---|---|
 | 1 | `budgets.qnt` | stockNeverExceedsCap, childFloorsFitParent, kernelFloorAvailable, bucketWithinCapacity, layeredStopOrdering, notifierIsOffBudget | default (Apalache default bound, reached step 10) | **NoError** | 76.3s |
-| 2 | `consensus.qnt` `[max-steps=10]` | proposerNotDisposer, verifyBeforeVote, refutedNeverCommits, quorumAndThreshold, noAutonomousLowCoverageHighBlast, mechanicalTiering, breakGlassOnlyOnDeadlock | 10 | **NoError** | 409.8s (~6m50s) |
+| 2 | `consensus.qnt` `[max-steps=10]` | proposerNotDisposer, verifyBeforeVote, refutedNeverCommits, quorumAndThreshold, noAutonomousLowCoverageHighBlast, mechanicalTiering, breakGlassOnlyOnDeadlock | 10 | **NoError** | 28.7s (_re-run, §9_) |
 | 3 | `mailbox.qnt` `[max-steps=6]` | corrInjective, answerClearsOwnNode, gatingConsistent, bindingIs1to1, precedenceNoDeadlock | 6 | **NoError** | 30.5s |
 | 4 | `smoke.qnt` | nonNegative | default | **NoError** | 4.4s |
 | 5 | `state_model.qnt` (default step) | headReachable, linearSpine, gapFreeTime, constitutionalIffKernel, constitutionalFlagHonest | default (reached step 10) | **NoError** | 29.7s |
@@ -121,12 +126,14 @@ Columns: `Invariant | Spec §` | `Method` | `Result` | `Note`. Grouped by module
 | quorumAndThreshold | `02` §9.1 (ordinary 2/3) / §9.2 (constitutional 3/4) / §10.1 (quorum vs. threshold) | MC (max-steps=10) | holds | |
 | noAutonomousLowCoverageHighBlast | `02` §5.1 (ROB-01 red-team lane / ROB-02 measured diversity), §6.6 / §11.10 (ROB-03 burn-in gates autonomy) | MC (max-steps=10) | holds | **ROB validation** — a high-blast proposal cannot auto-commit under low coverage / low diversity / burn-in; must Escalate. |
 | mechanicalTiering | `02` §11.9 (UX-03: tier assignment is mechanical, not Guardian discretion) | MC (max-steps=10) | holds | `tier == Routine implies not blastHigh` — `classify` pins them together. |
-| breakGlassOnlyOnDeadlock | `02` §10.4 / §11.11 (ROB-04 break-glass gated on mechanically-detected deadlock) | MC (max-steps=10) | holds | **ROB validation.** See §5 modeling-notes caveat on `detectDeadlock`'s over-approximation. |
+| breakGlassOnlyOnDeadlock | `02` §10.4 / §11.11 (ROB-04 break-glass gated on mechanically-detected deadlock) | MC (max-steps=10) | holds | **ROB validation.** _Update (follow-up, §9):_ `detectDeadlock` was tightened to require a **completed uncommitted round** (all seats cast + terminal Rejected/Escalated), so this now proves "council widened implies a genuine completed-and-failed round," not "implies a fresh/never-attempted round." See §6. |
 | refutedRejectsNoVoteTest | `02` §4.2 | scenario | holds | |
 | authorCannotVoteTest | `00` §3 propose!=dispose | scenario | holds | |
 | ordinaryPassPathTest | `02` §9.1 | scenario | holds | Genuine 4-Approve/1-Reject round reaches Committed (non-vacuity witness for `quorumAndThreshold`/`refutedNeverCommits`). |
 | correlatedCouncilCannotAutoCommitTest | `02` §5.1 (ROB-01/02/03 headline) | scenario | holds | One-family, all-Approve, high-blast, low-coverage council -> **Escalated**, not Committed. |
 | breakGlassGatedTest | `02` §10.4 (ROB-04) | scenario | holds | Break-glass is guard-disabled at genesis (before any deadlock is detected). |
+| deadlockNeedsCompletedRoundTest | `02` §10.4 (ROB-04 §9 tightening) | scenario | holds | `detectDeadlock` is guard-disabled at genesis — no seat has voted, so the completed-round guard fails. |
+| deadlockAfterFailedRoundEnablesBreakGlassTest | `02` §10.4 (ROB-04 §9 tightening) | scenario | holds | After a unanimous-Reject full round (-> Rejected), `detectDeadlock` enables and break-glass widens council to {..6,7} — the legitimate recovery route survives the tightening. |
 
 ### 2.6 smoke.qnt (toolchain scaffold — no spec §, infra only)
 
@@ -135,7 +142,7 @@ Columns: `Invariant | Spec §` | `Method` | `Result` | `Note`. Grouped by module
 | nonNegative | — (toolchain smoke test) | MC | holds | Proves the pinned Quint/Apalache toolchain runs end-to-end. |
 | countsUpTest | — | scenario | holds | |
 
-**Row count: 46** (26 MC invariant rows + 20 scenario/sim rows) across all 5 verified modules plus `base`'s 2 imported scenarios.
+**Row count: 48** (26 MC invariant rows + 22 scenario/sim rows) across all 5 verified modules plus `base`'s 2 imported scenarios — was 46 before the §9 follow-up added two consensus deadlock-gating scenarios.
 
 ---
 
@@ -222,9 +229,14 @@ artifact in this Quint suite's own plan code (now fixed, no prose defect)?
   overwritten by the resolution of any single one). This is exactly the ambiguity the Quint
   model's F4/F5 counterexamples exploited. Filed:
   **`specs/issues/ROB-09-mailbox-safe-hold-multigate.md`** (new file; `specs/*.md` prose left
-  untouched, per the hard constraint).
+  untouched, per the hard constraint of the original task).
+  **_Update (follow-up, §9):_** the constraint has since been lifted and the clarification
+  **applied** — `06` §3.4's gating-edge bullet now states a node's `Blocked` state is the
+  **conjunction over all currently-active gating edges** (active = `OPEN` **or** safe-held
+  `CLOSED` per §2.4), with a matching cross-reference added to §2.4's high-stakes bullet.
+  ROB-09 is now `status: resolved`; spec prose and the Quint model now agree.
 
-No other `violated`/`caveat` rows exist in the final suite (all 46 rows in §2 are `holds`),
+No other `violated`/`caveat` rows exist in the final suite (all rows in §2 are `holds`),
 so F1-F5 are the complete set of judged findings.
 
 ---
@@ -264,17 +276,24 @@ papered over — consistent with every per-task report's own "Concerns" section.
   separately-named predicate (matching `02` §10.1's quorum/threshold distinction) for
   spec-fidelity even though this particular fixture never exercises the "quorum missed"
   branch.
-- **`detectDeadlock` over-approximates "deadlock" in consensus.qnt (Task 10 reviewer note).**
-  Its guard (`not deadlockDetected and outcome != Committed`) is enabled at genesis, before any
-  council round has even run — so it can "detect" a deadlock on a fresh/never-attempted round,
-  not only a genuinely persistently-split one (`02` §10.4's actual trigger: persistent split
-  across `max_rounds` / cannot raise quorum / chronically high dispersion). This makes
-  `breakGlassOnlyOnDeadlock` **sound but weaker than the full ROB-04 narrative** — it proves
-  "council widened implies *some* mechanical deadlock flag was set," not "council widened
-  implies a *persistent, multi-round* split occurred." Flagged for a future tightening
-  (require a completed uncommitted round, or a round counter) rather than treated as a defect
-  here — the invariant genuinely holds either way, just over a broader (safer-to-satisfy)
-  antecedent than the prose's precise trigger.
+- **`detectDeadlock` in consensus.qnt — over-approximation, now partly tightened (Task 10
+  reviewer note; resolved in §9 follow-up).** _As originally shipped:_ its guard
+  (`not deadlockDetected and outcome != Committed`) was enabled at genesis, before any council
+  round had even run — so it could "detect" a deadlock on a fresh/never-attempted round, making
+  `breakGlassOnlyOnDeadlock` sound but weaker than ROB-04's narrative. **_Update (follow-up,
+  §9):_** the guard is now `not deadlockDetected and votes fully cast (every seat) and outcome
+  ∈ {Rejected, Escalated}` — it fires only after a **completed uncommitted round**, and the
+  full-cast clause also correctly excludes the verification-refutation reject (which leaves
+  `votes` empty). `breakGlassOnlyOnDeadlock` now proves "council widened implies a genuine
+  completed-and-failed round occurred." A residual, deliberately-unclosed gap remains: this is
+  still a *single* completed round, not the prose's *persistent, multi-round* split
+  (`02` §10.4: split across `max_rounds` / cannot raise quorum / chronically high dispersion) —
+  modeling true multi-round persistence would need a round counter and a re-run loop the
+  bounded single-round funnel does not have, so it is left as a known, documented
+  over-approximation (safe direction: the antecedent is still broader than the prose trigger,
+  so the invariant cannot be violated by tightening it further). Two scenarios
+  (`deadlockNeedsCompletedRoundTest`, `deadlockAfterFailedRoundEnablesBreakGlassTest`) pin the
+  new gating; re-verified `NoError` at max-steps=10 (§1.3).
 - **`idle` no-op stutter actions (mailbox.qnt, consensus.qnt).** Added to `step`'s `any{}` in
   both modules solely so Apalache's transition relation never deadlocks once the bounded id
   pool is exhausted or a terminal `outcome` is reached — a model-completeness artifact of
@@ -305,16 +324,51 @@ bounded model, recorded here as evidence (not new findings):
 
 ## 8. Summary
 
-- Suite gate: **typecheck 5/5 modules clean, test 28/28 (20 unique scenarios) passing,
-  verify 6/6 passes NoError** — the suite is fully green as shipped.
-- 46 invariant/scenario rows traced to spec sections in §2 (26 model-checked, 20
-  scenario/sim-checked); all 46 currently `holds`.
+- Suite gate: **typecheck 5/5 modules clean, test 30/30 (22 unique scenarios) passing,
+  verify 6/6 passes NoError** — the suite is fully green (test count updated by the §9
+  follow-up; was 28/20 as originally shipped).
+- 48 invariant/scenario rows traced to spec sections in §2 (26 model-checked, 22
+  scenario/sim-checked); all currently `holds`.
 - 5 real plan-code bugs (F1-F5) were caught and fixed during development; F5 is a genuine
   reachable safety bug (a safe-held high-stakes block could be wrongly released under a
   multi-gate interaction), now fixed and re-verified.
 - Of the 5, only F5 reflects a genuine ambiguity in the `specs/*.md` prose (an implicit,
   never-stated multi-gate conjunction rule) — filed as
-  `specs/issues/ROB-09-mailbox-safe-hold-multigate.md`. F1-F4 are modeling/transcription
-  artifacts in this suite's own Quint code; no spec-prose issue filed for them.
+  `specs/issues/ROB-09-mailbox-safe-hold-multigate.md` and **now resolved in prose** (§9).
+  F1-F4 are modeling/transcription artifacts in this suite's own Quint code; no spec-prose
+  issue filed for them.
 - All checks are bounded model checks over small fixed domains (§5) — not unbounded/inductive
   proofs. This is disclosed, not hidden.
+
+---
+
+## 9. Follow-up resolutions (2026-07-01)
+
+The two deferred items this report flagged were subsequently closed out. Both were re-gated
+(typecheck 6/6, test 30/30, consensus re-verified `NoError`).
+
+**(a) ROB-09 spec-prose clarification — applied (was §4's "prose left untouched").**
+`specs/06-interaction-and-mailbox.md` §3.4's gating-edge bullets now state explicitly that a
+progress node's `Blocked` state is the **conjunction over all of its currently-active gating
+edges** — where "active" means a Question that is `OPEN` **or** one that has safe-held into
+the bounded high-stakes fallback of §2.4 (`CLOSED` by escalation-timeout, node still held) —
+and that answering/closing one Question clears only *that* edge; the node returns to `Ready`
+only once no active edge remains. A cross-reference was added to §2.4's high-stakes
+hold-and-degrade bullet. This is exactly the semantics the Quint model already enforces
+(F4/F5), so spec prose and model now agree. `specs/issues/ROB-09-*.md` flipped to
+`status: resolved`. This is a conservative, backward-compatible clarification — the common
+single-Question-per-node case is unaffected.
+
+**(b) `detectDeadlock` tightening — applied (was §6's "flagged for a future tightening").**
+`consensus.qnt`'s `detectDeadlock` guard changed from the genesis-enabled `outcome != Committed`
+to requiring a **completed uncommitted round**: every council seat cast a vote **and** `decide`
+produced a terminal `Rejected`/`Escalated` outcome. `breakGlassOnlyOnDeadlock` now proves
+"council widened implies a genuine completed-and-failed round," not "implies any fresh round."
+Two new scenarios pin the gating (`deadlockNeedsCompletedRoundTest` proves it is disabled at
+genesis; `deadlockAfterFailedRoundEnablesBreakGlassTest` proves the legitimate recovery route
+still reaches a widened council). Notably the re-verify was **28.7s vs. the original 409.8s** —
+the tighter guard prunes the genesis-firing branch, shrinking the reachable state space. One
+residual over-approximation is left **deliberately open and documented** (§6): this gates on a
+*single* completed round, not the prose's *persistent, multi-round* split, which the bounded
+single-round funnel cannot express without a round counter + re-run loop. The direction is
+safe (antecedent still broader than the prose trigger), so no invariant is at risk.
