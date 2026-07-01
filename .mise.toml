@@ -1,0 +1,19 @@
+[tools]
+"npm:@informalsystems/quint" = "0.24.0"
+"java" = "temurin-21"
+
+[env]
+# Apalache is a JVM tool; install via its release tarball into ~/.local and point at it.
+APALACHE_HOME = "{{env.HOME}}/.local/apalache"
+
+[tasks.quint-typecheck]
+description = "Typecheck every Quint module"
+run = "for f in specs/quint/*.qnt; do echo \"== $f\"; quint typecheck \"$f\"; done"
+
+[tasks.quint-test]
+description = "Run all Quint run/scenario tests"
+run = "for f in specs/quint/*.qnt; do echo \"== $f\"; quint test \"$f\"; done"
+
+[tasks.quint-verify]
+description = "Apalache bounded model-check core safety invariants"
+run = "bash specs/quint/verify.sh"
