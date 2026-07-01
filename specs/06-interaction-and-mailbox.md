@@ -142,6 +142,8 @@ The Mailbox is the *single* place internal escalations become human-visible:
 
 In both cases the Interaction plane is doing its job: translating an internal condition into the typed, scarce, blocking-or-not vocabulary the user understands.
 
+**The deterministic budget notifier (`10`).** Budget-exhaustion escalations are special: they are raised by an **off-budget, non-LLM reflex** that emits a schema-validated `BudgetNotice` (a typed Mailbox item) computed entirely from the `07` ledger. It is self-funding (draws from no budget node) and un-forgeable (a drifting or compromised LLM cannot corrupt the message a funding decision rests on), debounced by the same deadband/hysteresis the steering loop uses. If reserved-floor budget remains, the Guardian LLM *additionally* enriches it — a guaranteed baseline plus best-effort context. The blocked work waits under the usual bounded escalation-timeout and then degrades safely; on top-up or reallocation it resumes.
+
 ---
 
 ## 3. Detailed design
@@ -490,6 +492,8 @@ Answering is idempotent per `question_id`: a second answer to an already-`Answer
 | Outbound | `poll` / `subscribe` notifications | Notifications, Questions, escalations from `02`/`03` |
 | Read | `list open questions` | the blocking work surface (with `gates` edges) |
 | Inbound | `answer_question` | Answers that unblock gated nodes |
+
+**Setting budgets (`10`).** Through this surface a user sets or overrides the **stock** and **rate** budgets of any node they are authorized for — the global ceiling and, optionally, per-class / per-agent allocations. Budget setpoints follow the same strict-priority resolution as other setpoints (`03` §7.1): explicit user override → guardrailed learned refinement → safe default. Changes are enacted as tiered typed proposals (`02` §9.4).
 
 ---
 

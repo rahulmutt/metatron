@@ -296,6 +296,33 @@ trait McpAuthProxy {
     fn discover_tools(&self, svid: &Svid) -> ToolList;             // filtered to authorized scopes
     fn invoke(&self, svid: &Svid, call: McpToolCall) -> McpResult; // brokered; credential injected, never returned
 }
+
+// ---- Budgets (10) ----
+/// Normalized accounting currency: the RD-4 common cost unit
+/// (tokens × price + wallclock × rate), tokens dominant. See 04 (RD-4), 07.
+type CostUnit = f64;
+type CostRate = f64;                 // CostUnit per second
+
+/// The budget hierarchy. Part of the CONFIGURATION layer (01); governed state.
+/// Allocation only — measured spend is runtime, in the 07 ledger (never committed).
+struct BudgetTree { root: BudgetNodeId, nodes: Map<BudgetNodeId, BudgetNode> }
+type BudgetNodeId = Hash;
+
+struct BudgetNode {
+    scope:  BudgetScope,             // Global | Class(Role) | Agent(AgentId)
+    stock:  StockBudget,
+    rate:   RateBudget,
+    parent: Option<BudgetNodeId>,    // None at the Global root
+}
+enum BudgetScope { Global, Class(Role), Agent(AgentId) }   // Role = the 00 §3 taxonomy role
+
+/// Cumulative allocation. `floor` is guaranteed (may be 0); `burst_cap` bounds
+/// draw from the shared parent burst pool; `shutdown_reserve` is carved under
+/// the cap to fund a clean stop (notify + drain + checkpoint). See 10.
+struct StockBudget { floor: CostUnit, burst_cap: CostUnit, shutdown_reserve: CostUnit }
+
+/// Flow allocation as a token bucket: `sustained` = refill rate, `burst_depth` = depth.
+struct RateBudget { sustained: CostRate, burst_depth: CostUnit }
 ```
 
 ---
@@ -336,6 +363,12 @@ trait McpAuthProxy {
 | **Hybrid-PQ crypto** | Composite classical+post-quantum cryptography: `Ed25519+ML-DSA` signatures, `X25519+ML-KEM` transport. Verification requires both halves. |
 | **`mcp-auth-proxy`** | The user-deployed gateway (its own trust boundary, holding the user's secrets) that brokers all agent calls to external MCP servers. **Gateway-only**: agents never receive downstream tokens. |
 | **Privilege separation** | The principle that an agent's only long-term secret is its identity key, so compromising an agent never compromises standing secrets. |
+| **Budget tree / `BudgetNode`** | The governed global→class→agent hierarchy of cost *allocations*, part of the configuration layer. Spend is measured separately in `07`. (`10`) |
+| **Stock budget** | A node's cumulative cost allowance over the goal's life. (`10`) |
+| **Rate budget** | A node's flow allowance (cost per unit time), enforced as a token bucket. (`10`) |
+| **Shutdown reserve** | Cost carved under a node's cap to fund a clean stop (notify + drain + checkpoint) before the hard cap. (`10`) |
+| **Deterministic budget notifier** | An off-budget, non-LLM reflex that emits a typed mailbox alert on stock depletion — self-funding, un-forgeable. (`10`, `06`) |
+| **`CostUnit`** | The normalized accounting currency (RD-4: tokens×price + wallclock×rate), the denomination of all budgets. (`10`, `04`, `07`) |
 
 ---
 
@@ -350,7 +383,9 @@ trait McpAuthProxy {
    │       │       │
    │       │       └── 03-control-loop ... defines ErrorVector, steering loop (emits proposals)
    │       │
-   │       └── 06-interaction .... Guardians author proposals; mailbox blocks on ambiguity
+   │       ├── 06-interaction .... Guardians author proposals; mailbox blocks on ambiguity
+   │       │
+   │       └── 10-budgets ......... budget tree in config layer; enforcement, notifier
    │
    ├── 04-runtime-and-harness .... AgentHarness, ExecutionBackend (reconciles desired state)
    │       │

@@ -190,6 +190,11 @@ This is the normative emission contract. Each row is `Event(s) · key Metric(s) 
 #### Execution plane (04, 05) — Workers, Compilers
 - **Events:** `ReconcileActionStarted`, `ReconcileActionFinished`, `HarnessSessionStart`, `HarnessSessionEnd`, `TrapFired`, `DeoptOccurred`, `TierPromoted`, `TierDemoted`.
 - **Metrics:** `exec.reconcile_actions_total{status}`; `exec.harness_session_seconds` (histogram — **latency** input); `exec.tokens_total{harness}` and `exec.cost_units_total{harness}` (the **cost** input); `exec.trap_rate{agent}` (**Sentinel + tier-demotion input**); `exec.deopt_total`; `exec.tier{agent}` (gauge: 0/1/2); `exec.progress_delta` (artifacts/sub-goals resolved — **progress** input).
+- **Budget metrics:** `budget.spend_units_total{scope}` (cumulative stock, rolled up
+  agent→class→global — the **stock-enforcement** and **notifier** input);
+  `budget.burn_rate{scope}` (gauge — the **rate-enforcement** input);
+  `budget.utilization_ratio{node}` (spend ÷ cap — the deterministic `BudgetNotice`
+  and the soft `cost` dimension both read this).
 - **Spans:** `reconcile.action`, `harness.session` (best-effort children: `harness.step`, `harness.tool_call`, `harness.diff` — present only at the harness's declared capability, §3.5), `jit.trap`, `jit.deopt`.
 
 #### Observability-self plane (07) — Sentinels + the plane itself
@@ -241,6 +246,8 @@ exec.harness_session_seconds,                  →  latency   (responsiveness)
 **Verification coverage is the second first-class control input — the antidote to the worst failure mode (ROB-01).** `dispersion` measures only *disagreement*, never *wrongness*. The most dangerous LLM failure is a **correlated, confidently-wrong council** — agents sharing a base model converging on a bad answer — which emits *low* dispersion and would otherwise read as the **healthiest** possible telemetry: the worst failure mode emitting the best signal. To make that failure observable, the plane exposes **`consensus.verification_coverage`** — the **fraction of a decision that was machine-verifiable** under the deterministic gate (G0), reported per `Decision` alongside `dispersion`. The two are combined into a composite **`consensus.confident_error_risk`** signal — **low dispersion *and* low coverage** — which the control loop (03) is required to read as an **escalating risk signal, not a healthy reading**. A confidently-unanimous council deciding a largely-unverifiable proposal is precisely when the loop must **escalate** (widen uncertainty, demand the decorrelated red-team lane in 02, or escalate to a human), never relax. Cross-ref **03** (the controller's escalation response) and **02** (the decorrelated red-team lane on high-blast-radius proposals).
 
 Each steering-loop computation emits `ErrorVectorSampled` (closing the measurement, with the originating `TraceId`/`EpisodeId`) and the resulting control action emits `ControlActionEmitted` carrying `derived_from` so the **next** `ProposalAuthored` is causally linked back (00 §7: `Proposal.derived_from`). This is the seam that closes the loop in the telemetry graph.
+
+**The accounting ledger (`10`).** Observability owns the runtime `BudgetLedger`: it debits each agent's measured spend and **rolls it up** to the agent's class node and the global root, deterministically. This ledger is the substrate both the `10` enforcement path and the off-budget deterministic notifier read. It is **runtime state, not committed** to the Merkle log (mirroring the allocation/spend split of `01`).
 
 ### 3.5 Best-effort harness telemetry & graceful degradation
 
@@ -474,6 +481,15 @@ trait ControlFeed {
     fn latency(&self) -> TimeSeries;
     /// Coverage-weighted variance hint, so the steering loop can degrade gracefully (§3.5).
     fn confidence(&self, dim: &str) -> f32;
+}
+
+/// Budget enforcement & notifier input contract (§3.2 budget metrics, `10` §4) →
+/// feeds the `10` stock/rate-enforcement path and the deterministic BudgetNotice notifier.
+trait BudgetFeed {
+    fn spend_units_total(&self, scope: BudgetScope) -> TimeSeries;  // budget.spend_units_total{scope} — rolled-up stock
+    fn burn_rate(&self, scope: BudgetScope) -> TimeSeries;          // budget.burn_rate{scope} — rate-enforcement input
+    fn utilization_ratio(&self, node: BudgetNodeId) -> TimeSeries;    // budget.utilization_ratio{node} — notifier threshold
+    fn ledger_rollup(&self) -> Stream<BudgetLedger>;              // live BudgetLedger roll-up (agent→class→global)
 }
 ```
 

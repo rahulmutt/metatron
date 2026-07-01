@@ -143,7 +143,7 @@ struct TaskSpec {
     inputs: Vec<ArtifactRef>,   // content-addressed inputs (prior diffs, docs, specs)
     permitted_tools: ToolGrant, // capability-scoped allow-list (see §6); least privilege
     workspace: WorkspaceSpec,   // the filesystem/repo sandbox the session runs in (§6.3)
-    budget: Budget,             // wall-clock, token, and cost ceilings (best-effort enforced)
+    budget: Budget,             // binds to the agent's BudgetNode in the 10 tree; enforcement per 10
     acceptance: Vec<Check>,     // machine-checkable success criteria, determinism-first (§3.5)
     deadline: Option<LogicalTime>,
 }
@@ -361,6 +361,8 @@ struct SupervisionPolicy {
 - A **failed session** (`Outcome::Failed`/`TimedOut`) is a *local* event: the supervisor restarts the agent's session per policy. Restart is safe for idempotent work; tools with non-transactional external effects are declared `non-restartable` and **escalate instead of blind-restarting** (RD-5, §9).
 - A **persistently failing agent** that blows its restart budget **escalates**: the failure becomes observable signal (`07`), can drive a Sentinel detection and a reputation hit (`08`), and ultimately surfaces as a control signal that the **council** may respond to by *retiring or rewiring* the agent (a `02` proposal) — closing back up into the **steering loop** (`03`), the governance loop nested around reconciliation. The Execution plane never *decides* to remove an agent from desired state; it surfaces evidence and lets governance decide.
 - **`OneForAll`/`RestForOne`** matter for *wired teams*: if a coordinator agent dies, dependent workers may need coordinated restart, exactly as in actor supervision trees.
+
+**Budget depletion enforcement (`10`).** When an agent's `BudgetNode` crosses its **stock** soft threshold (`cap − shutdown_reserve`), the execution plane runs the layered stop of `10`: the agent drains to an atomic boundary (finishing an in-flight tool call — never hard-cancelled mid-`mcp-auth-proxy` call), **checkpoints** if the harness exposes the checkpoint/preempt capability (§3.3) or else **freezes** (safe: committed progress lives in `01`, so it re-plans on resume like any restarted agent), with the RD-4 **hard-cancel** as the bounded-grace backstop for non-cooperative or runaway harnesses. A **rate** breach is instead **throttled** (dispatch delayed / concurrency shed) and self-heals; only *sustained* throttling escalates (`03`).
 
 ### 4.4 Reference backend A — `RustActorBackend`
 
@@ -583,7 +585,7 @@ Committed design from the v0.1 design review. These were formerly open questions
 
   **The default class for harness sessions is `atomic`.** When desired state changes mid-session, reconciliation **waits or force-cancels by class** — it never blind-kills an atomic session. A **generation change mid-session drains by class** rather than by one global policy.
 
-- **RD-4 — Cost & quota accounting (was OQ-4).** Heterogeneous billing models (per-token, per-seat, per-request) are **normalized to a common cost unit** via a **per-harness cost model**. When `usage_accounting` is absent, cost falls back to **wall-clock × tier-price**, emitted as a **flagged estimate** and **reconciled against actuals** afterward. Budgets are **enforced by hard-cancel at thresholds** (non-cooperative sessions cannot be throttled, only stopped). **Quota exhaustion mid-session uses the RD-3 force-cancel path.**
+- **RD-4 — Cost & quota accounting (was OQ-4).** Heterogeneous billing models (per-token, per-seat, per-request) are **normalized to a common cost unit** via a **per-harness cost model**. When `usage_accounting` is absent, cost falls back to **wall-clock × tier-price**, emitted as a **flagged estimate** and **reconciled against actuals** afterward. Budgets are enforced by a **layered protocol** (below), with hard-cancel as the backstop for non-cooperative sessions. **Quota exhaustion mid-session falls back to the RD-3 force-cancel path as the backstop**, after the cooperative drain / checkpoint-or-freeze grace window. Budgets are **hierarchical** (global→class→agent) and carry both a **stock** and a **rate** allowance (`10`). Stock enforcement is no longer a bare hard-cancel: it is soft-threshold → cooperative-drain → checkpoint-or-freeze → hard-cancel backstop. Rate enforcement is **throttle**, falling back to hard-cancel only when a non-cooperative harness sustains the breach.
 
 - **RD-5 — Side effects & restart idempotency (was OQ-5).** External side effects use an **outbox + effect-log** pattern. A tool with **non-transactional external effects** (pushed a branch, called an API, sent a message) is **declared `non-restartable`**; on failure, supervision **escalates rather than blind-restarting** it, applying **compensation where defined**. Isolated workspaces (RD-2) contain *filesystem* effects on cancel/restart but **not external** ones — those are governed by the effect log.
 

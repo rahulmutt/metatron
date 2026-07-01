@@ -660,6 +660,8 @@ fn write_tier(p: &Proposal, head: &WorldModel) -> WriteTier {
 
 This is the blast-radius tiering applied to the **actual write path**, not merely described: only Ordinary and Constitutional proposals convene the council; the cheap, reversible majority of writes never do.
 
+**Budget reallocation (`10`).** Changing a `BudgetNode` is a typed diff tiered by blast radius like any other write. **Routine per-agent / per-class top-ups within the existing global pool** take this single-Guardian + post-hoc-audit fast path — reversible, low blast radius. **Raising the global ceiling or changing kernel (Guardian/Genesis) floors** is constitutional-adjacent: it takes the reputation-weighted ¾ threshold (§9.2), because it enlarges the system's total spending authority or touches the funding that keeps governance itself alive.
+
 ---
 
 ## 10. Liveness, quorum, and equivocation
