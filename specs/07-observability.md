@@ -173,8 +173,8 @@ The bus is **non-blocking by construction**: producers never block the control l
 This is the normative emission contract. Each row is `Event(s) · key Metric(s) · Span(s)`.
 
 #### Interaction plane (06) — Guardians
-- **Events:** `InstructionReceived`, `GoalNormalized`, `AmbiguityDetected`, `QuestionRaised`, `QuestionAnswered`, `NotificationSent`.
-- **Metrics:** `interaction.instructions_total`; `interaction.ambiguity_rate`; `interaction.question_blocked_seconds` (how long work blocked on the mailbox — feeds **latency**); `interaction.questions_open` (gauge).
+- **Events:** `InstructionReceived`, `GoalNormalized`, `AmbiguityDetected`, `QuestionRaised`, `QuestionAnswered`, `NotificationSent`, `RenderDegraded`.
+- **Metrics:** `interaction.instructions_total`; `interaction.ambiguity_rate`; `interaction.question_blocked_seconds` (how long work blocked on the mailbox — feeds **latency**); `interaction.questions_open` (gauge). All interaction metrics carry a **`channel` dimension** (`ChannelKind` — `api` | `slack` | `telegram` | `sms` | …) so interruption rate, answer latency, and open-question counts are attributable per channel. Adds `interaction.render_degradation_total{channel}` (counter — outbound `Question`s whose structured options were rendered lossily because the channel lacks `supports_structured_options`, `06` §3.8).
 - **Spans:** `intake` (root span; opens `TraceId` lineage via `InstructionId`/`GoalId`), `normalize`, `await_user` (the blocking span — its duration is the mailbox-block latency).
 
 #### Governance plane (02, 03) — Guardians (author) + Genesis (dispose)
