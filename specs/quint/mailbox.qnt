@@ -50,12 +50,21 @@ module mailbox {
   def nodeBlockedGet(n: int): bool =
     if (n.in(nodeBlocked.keys())) nodeBlocked.get(n) else false
 
-  // Is some OTHER (id != selfQ) question still Open and gating `node`, evaluated against the
-  // PRE-image `questions` map (i.e. before the current transition's questions' update lands)?
-  // Needed by deliverAnswer below: excluding selfQ matters because at guard-eval time selfQ's
-  // own qstate in `questions` is still Open (its Answered update is only visible in questions').
-  def anotherOpenGate(node: int, selfQ: int): bool =
-    questions.keys().exists(q2 => q2 != selfQ and questions.get(q2).gatesNode == node and questions.get(q2).qstate == Open)
+  // Is some OTHER (id != selfQ) question still ACTIVELY gating `node` — Open (awaiting an
+  // answer) OR Closed (a high-stakes safe-hold from timeoutHighStakes, which retains the
+  // block by design, §3.7 line 132) — evaluated against the PRE-image `questions` map (i.e.
+  // before the current transition's questions' update lands)? Needed by deliverAnswer below:
+  // excluding selfQ matters because at guard-eval time selfQ's own qstate in `questions` is
+  // still Open (its Answered update is only visible in questions').
+  //
+  // Generalized from Open-only to Open-or-Closed (Task 8 fix, see gatingConsistent below):
+  // Closed arises ONLY from timeoutHighStakes' safe-hold, so it is model-wide a second,
+  // legitimate block-retaining reason alongside Open. This is a conservative extension: when
+  // no Closed question is present (Task 7's entire reachable space), the predicate reduces
+  // exactly to its prior Open-only form.
+  def anotherActiveGate(node: int, selfQ: int): bool =
+    questions.keys().exists(q2 => q2 != selfQ and questions.get(q2).gatesNode == node
+      and (questions.get(q2).qstate == Open or questions.get(q2).qstate == Closed))
 
   // NB: a `val` inside `all{}` only scopes over the SINGLE next comma item, not the whole
   // rest of the chain (confirmed empirically against Quint 0.24.0 — the brief's flat
@@ -87,8 +96,8 @@ module mailbox {
   // counterexample against `gatingConsistent`: with two Open questions gating the SAME
   // node, answering one blindly cleared nodeBlocked for that node even though the other
   // question was still Open and still gating it. Fixed below to only clear the block when
-  // no other Open question still gates the node (anotherOpenGate), matching what
-  // answerClearsOwnNode already assumed of the design.
+  // no other ACTIVE (Open or safe-held Closed) question still gates the node
+  // (anotherActiveGate), matching what answerClearsOwnNode already assumes of the design.
   action deliverAnswer(tok: int, user: UserId): bool = all {
     tok.in(corr.keys()),
     val q = corr.get(tok)
@@ -97,7 +106,7 @@ module mailbox {
       mayAnswerGet(user, q),                         // token match alone never authorizes
       questions' = questions.set(q, { ...questions.get(q), qstate: Answered }),
       openIndex' = openIndex.exclude(Set((questions.get(q).recipient, q))),
-      nodeBlocked' = nodeBlocked.set(questions.get(q).gatesNode, anotherOpenGate(questions.get(q).gatesNode, q)),
+      nodeBlocked' = nodeBlocked.set(questions.get(q).gatesNode, anotherActiveGate(questions.get(q).gatesNode, q)),
       corr' = corr, nextTok' = nextTok, mayAnswer' = mayAnswer,
       bindingTable' = bindingTable, rank' = rank,
     }
@@ -119,16 +128,16 @@ module mailbox {
   // the Question resolves to a defined bounded fallback (Closed) rather than staying Open
   // forever. This is the liveness floor: no high-stakes path blocks indefinitely.
   //
-  // FINDING (design tension, see task-8-report.md): keeping the node blocked while the
-  // Question leaves Open is INTENTIONAL per the design, but it is inconsistent with Task 7's
-  // `gatingConsistent` biconditional (nodeBlocked[n] <=> some Open question gates n). The
-  // safe-hold is a SECOND, distinct block-reason the biconditional does not model. Including
-  // this action in the VERIFIED `step` relation therefore produces a genuine gatingConsistent
-  // counterexample at depth 2. Because the task requires preserving Task 7's gatingConsistent
-  // fix EXACTLY (a compatible refinement would also force editing deliverAnswer's clear rule),
-  // this action is exercised/verified via its liveness scenario `neverAnsweredResolvesTest`
-  // (quint test) and is deliberately NOT part of the verified `step` any{} — documented, not
-  // force-fit. See report for the captured Apalache trace.
+  // FINDING (resolved, see task-8-report.md "Fix: complete gatingConsistent..."): keeping the
+  // node blocked while the Question leaves Open is INTENTIONAL per the design, and Closed is a
+  // SECOND, legitimate block-retaining reason alongside Open. Task 7's `gatingConsistent`
+  // biconditional (nodeBlocked[n] <=> some Open question gates n) was INCOMPLETE, not this
+  // action's fault — excluding the action from `step` would hide a genuine reachable bug
+  // (a safe-held Closed question's block being wrongly cleared by an unrelated deliverAnswer
+  // on a sibling Open question). Fix: generalize gatingConsistent, anotherActiveGate (used by
+  // deliverAnswer), and otherOpenGates (used by answerClearsOwnNode) to count Open OR Closed
+  // gating questions — a conservative extension of Task 7's Open-only invariants. This action
+  // is now part of the verified `step` any{} below.
   action timeoutHighStakes(q: int): bool = all {
     q.in(questions.keys()), questions.get(q).qstate == Open, questions.get(q).blastHigh,
     questions' = questions.set(q, { ...questions.get(q), qstate: Closed }),
@@ -155,19 +164,34 @@ module mailbox {
       corr.keys().size() > 0,
       nondet t = corr.keys().oneOf() (nondet u = Set(1,2).oneOf() deliverAnswer(t, u)),
     },
+    all {
+      questions.keys().size() > 0,
+      nondet q = questions.keys().oneOf() timeoutHighStakes(q),
+    },
     idle,
   }
 
   // --- invariants ---
   val corrInjective = corr.keys().forall(a => corr.keys().forall(b =>
     (corr.get(a) == corr.get(b)) implies (a == b)))
+  // Generalized (Task 8 fix) from Open-only to Open-or-Closed: a safe-held Closed
+  // high-stakes question (timeoutHighStakes) is a second legitimate block-retaining gate,
+  // just like an Open one. Conservative extension of Task 7's form — when no Closed question
+  // is present this reduces exactly to the prior `qstate == Open` predicate.
   def otherOpenGates(node: int): bool =
-    questions.keys().exists(q2 => questions.get(q2).gatesNode == node and questions.get(q2).qstate == Open)
+    questions.keys().exists(q2 => questions.get(q2).gatesNode == node
+      and (questions.get(q2).qstate == Open or questions.get(q2).qstate == Closed))
   val answerClearsOwnNode = questions.keys().forall(q =>
     questions.get(q).qstate == Answered implies (not(nodeBlockedGet(questions.get(q).gatesNode))
       or otherOpenGates(questions.get(q).gatesNode)))
+  // Generalized (Task 8 fix): nodeBlocked[n] <=> some question gating n is Open OR Closed
+  // (safe-held). Closed arises ONLY from timeoutHighStakes' high-stakes safe-hold, so
+  // "Closed => safe-held" holds model-wide, making Closed a sound second block-reason
+  // alongside Open. Conservative extension: reduces to Task 7's Open-only biconditional
+  // whenever no Closed question exists.
   val gatingConsistent = nodeBlocked.keys().forall(n =>
-    nodeBlocked.get(n) == questions.keys().exists(q => questions.get(q).gatesNode == n and questions.get(q).qstate == Open))
+    nodeBlocked.get(n) == questions.keys().exists(q => questions.get(q).gatesNode == n
+      and (questions.get(q).qstate == Open or questions.get(q).qstate == Closed)))
 
   // --- Task 8: 1:1 binding + cross-user precedence ---
 
