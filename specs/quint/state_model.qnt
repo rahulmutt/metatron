@@ -26,7 +26,7 @@ module state_model {
   action advanceHead(c: Commit): bool = all {
     c.in(staged), c.parent == headId,
     store' = store.put(c.id, c), headId' = c.id,
-    staged' = staged.exclude(Set(c)).filter(x => x.parent == c.id),  // stale losers dropped
+    staged' = Set(),  // a CAS win invalidates every candidate staged against the old head; all are dropped
     nextId' = nextId,
   }
   action step = any {
