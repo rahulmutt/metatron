@@ -1,4 +1,7 @@
-// # VERIFY: headReachable, linearSpine, gapFreeTime, constitutionalIffKernel, constitutionalFlagHonest, taskDagAcyclic, blockedTaskSafety
+// # VERIFY: headReachable, linearSpine, gapFreeTime, constitutionalIffKernel, constitutionalFlagHonest
+// # VERIFY-STEP: taskStep
+// # VERIFY-MAX-STEPS: 4
+// # VERIFY-STEP-INVARIANTS: taskDagAcyclic, blockedTaskSafety
 module state_model {
   import base.* from "./base"
 
