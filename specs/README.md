@@ -64,6 +64,7 @@ The specs are layered; each builds on the ones above it. This is the recommended
 | **07** | [observability](./07-observability.md) | Trace/metric/event model, end-to-end causal correlation, Sentinel + steering-loop-estimator feeds, verification-coverage signal | How "monitor everything" is made real |
 | **08** | [trust-and-security](./08-trust-and-security.md) | Identity, signing, reputation, sandboxing, Byzantine response, **agent identity & external-tool authorization** | How the system trusts (and distrusts) its own agents |
 | **09** | [mcp-auth-proxy](./09-mcp-auth-proxy.md) | User-deployed gateway-only MCP broker; privilege separation, gated discovery, two-layer authz, fail-closed/HA | How agents safely act in the world without holding secrets |
+| **10** | [budgets](./10-budgets.md) | User-defined hierarchical (global→class→agent) stock + rate budgets; reserved-floor+shared-burst allocation; layered depletion enforcement; off-budget deterministic notifier | How the user bounds and scopes spend, and how agents pause/throttle when depleted |
 
 **Cross-cutting:** `07` taps every plane; `08` and `09` thread trust through all of them.
 
@@ -98,6 +99,7 @@ The forks that shape everything else (see each spec's *Resolved decisions* secti
 - **Identity** — single-node default: **keypair `AgentId` + short-lived orchestrator-signed token + polled revocation list**; SPIFFE/SPIRE + the Metatron workload attestor are **gated behind a multi-cluster trigger** (OE-06). `AgentId` decoupled from a short-lived rotatable key; **hybrid post-quantum** crypto (`Ed25519+ML-DSA`, `X25519+ML-KEM`) kept as the default.
 - **Trust root** — threshold-of-founders (also the **break-glass authority** for council-deadlock recovery — ROB-04); offline root CA → SPIRE intermediate issuer, gated behind multi-cluster.
 - **External actions** — gateway-only `mcp-auth-proxy`: agents never hold downstream secrets; every privileged call is brokered, scoped from governed state, and **audited with field-redacted structured arguments** (plus an integrity digest — ROB-08). A consensus stall validates SVIDs against the **last-known-good head within a bounded grace window** rather than instantly amputating external action (ROB-05).
+- **Budgets** — user-defined budgets are **hierarchical** (global→class→agent) and carry both a **stock** (cumulative) and a **rate** (token-bucket) allowance, denominated in the normalized `CostUnit`. Allocation is **reserved-floor + shared-burst** so kernel governance stays funded under pressure while ephemeral workers run on shared burst; reallocation is a **tiered typed write** (in-pool top-ups fast-path, ceiling/floor changes constitutional). Depletion runs a **layered stop** (soft-threshold → cooperative drain → checkpoint/freeze → hard-cancel backstop; throttle for rate), announced by an **off-budget deterministic notifier** so telling the user "out of budget" never itself needs budget (`10`).
 
 ---
 
