@@ -535,6 +535,7 @@ struct Scope { resource: McpServerId, methods: Vec<MethodPattern> }
 - **Injection mitigations (T2) apply to *all* user input.** Authentication establishes *who* is speaking; it does **not** make the *content* trusted. Prompt-injection scrubbing and the typed-`Proposal`/council-verification gate (T2, §3.5) apply to every user instruction regardless of how well-authenticated its sender.
 
 ```rust
+type UserId = ExternalUserId; // 08-local alias for the canonical 00 §7 ExternalUserId
 /// A SEPARATE principal type from AgentId; authenticated at the 06 API boundary.
 struct UserPrincipal {
     user: UserId,                 // NOT an AgentId; distinct namespace
