@@ -38,6 +38,7 @@ Each issue was produced by a per-spec reviewer, **steelmanned by a skeptic** (ve
 | [ROB-06](./ROB-06-sentinel-consensus-sidedoor.md) | high | Sentinels are a single-agent side door into consensus weighting |
 | [ROB-07](./ROB-07-reversibility-classifier-undefined.md) | high | Blast-radius reversibility classifier is undefined yet gates autonomy |
 | [ROB-08](./ROB-08-audit-arg-digest-only.md) | medium | Audit records only an arg-digest, defeating forensics |
+| [ROB-09](./ROB-09-mailbox-safe-hold-multigate.md) | high | Mailbox does not state that a node's Blocked state is the conjunction of all its gating Questions |
 
 ### Usability — can a competent engineer hold the model in their head?
 
