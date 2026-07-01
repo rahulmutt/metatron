@@ -486,9 +486,9 @@ trait ControlFeed {
 /// Budget enforcement & notifier input contract (§3.2 budget metrics, `10` §4) →
 /// feeds the `10` stock/rate-enforcement path and the deterministic BudgetNotice notifier.
 trait BudgetFeed {
-    fn spend_units_total(&self, scope: &ScopeRef) -> TimeSeries;  // budget.spend_units_total{scope} — rolled-up stock
-    fn burn_rate(&self, scope: &ScopeRef) -> TimeSeries;          // budget.burn_rate{scope} — rate-enforcement input
-    fn utilization_ratio(&self, node: &NodeRef) -> TimeSeries;    // budget.utilization_ratio{node} — notifier threshold
+    fn spend_units_total(&self, scope: BudgetScope) -> TimeSeries;  // budget.spend_units_total{scope} — rolled-up stock
+    fn burn_rate(&self, scope: BudgetScope) -> TimeSeries;          // budget.burn_rate{scope} — rate-enforcement input
+    fn utilization_ratio(&self, node: BudgetNodeId) -> TimeSeries;    // budget.utilization_ratio{node} — notifier threshold
     fn ledger_rollup(&self) -> Stream<BudgetLedger>;              // live BudgetLedger roll-up (agent→class→global)
 }
 ```
