@@ -27,6 +27,33 @@ module reputation {
     driftCount' = council.mapBy(_ => 0),
   }
 
+  // one scoring round for agent a whose vote went AGAINST ground truth
+  action observeWrong(a: AgentId): bool = all {
+    a.in(weight.keys()),
+    weight'     = weight.set(a, maxInt(0, weight.get(a) - DECAY)),
+    driftCount' = driftCount.set(a, driftCount.get(a) + 1),
+  }
+  // one scoring round for agent a whose vote MATCHED ground truth
+  action observeRight(a: AgentId): bool = all {
+    a.in(weight.keys()),
+    weight'     = weight.set(a, minInt(CAP, weight.get(a) + 1)),
+    driftCount' = driftCount.set(a, 0),
+  }
+  // no-op stutter so `step` never deadlocks for Apalache once activity stops — a
+  // model-completeness artifact of the bounded fixture, not a weakening of any
+  // invariant (every invariant is still checked at every state, idle ones included).
+  // Same rationale as consensus.qnt / mailbox.qnt idle actions.
+  action idle: bool = all { weight' = weight, driftCount' = driftCount }
+
+  // only the bloc {1,2,3,4} may be driven wrong; the honest anchor {5} is only ever
+  // observed right, keeping total council weight positive so swingResistance stays a
+  // non-degenerate check of the decay dynamics (design §Fixture rationale).
+  action step = any {
+    nondet a = bloc.oneOf() observeWrong(a),
+    nondet a = council.oneOf() observeRight(a),
+    idle,
+  }
+
   // --- invariants ---
   val weightBounded =
     weight.keys().forall(a => 0 <= weight.get(a) and weight.get(a) <= CAP)
