@@ -95,11 +95,24 @@ module consensus {
     weight' = weight, familyOf' = familyOf, outcome' = outcome,
     coverageHigh' = coverageHigh, burnIn' = burnIn, deadlockDetected' = deadlockDetected,
   }
-  // A deadlock monitor: a full council round that failed to commit (outcome not Committed)
-  // may be mechanically flagged as deadlocked. Kept simple/monotonic (never un-set) — its
-  // only purpose is to ENABLE break-glass, so the recovery path is reachable in MC.
+  // A deadlock monitor: a full council round that mechanically FAILED to commit may be
+  // flagged as deadlocked. Kept simple/monotonic (never un-set) — its only purpose is to
+  // ENABLE break-glass, so the recovery path is reachable in MC.
+  //
+  // Tightened (ROB-04, FINDINGS.md §6 follow-up): the guard now requires that a full
+  // council round actually COMPLETED and did not commit — every seat cast a vote AND
+  // `decide` produced a terminal non-Committed outcome (Rejected / Escalated). It is no
+  // longer enabled at genesis on the bare `outcome != Committed` (which is trivially true
+  // before any round runs). This still over-approximates the prose's *persistent, multi-
+  // round* trigger (`02` §10.4) — a single completed uncommitted round suffices here, since
+  // the bounded funnel models one round — but it correctly excludes the never-attempted
+  // round and the verification-refutation reject (which leaves `votes` empty, failing the
+  // full-cast guard). `breakGlassOnlyOnDeadlock` is therefore now checked against a genuine
+  // completed-and-failed round, not a fresh one.
   action detectDeadlock: bool = all {
-    not(deadlockDetected), outcome != Committed,
+    not(deadlockDetected),
+    votes.keys().size() == council.size(),           // a full council round completed...
+    outcome == Rejected or outcome == Escalated,     // ...and mechanically failed to commit
     deadlockDetected' = true,
     author' = author, council' = council, tier' = tier, verification' = verification,
     votes' = votes, weight' = weight, familyOf' = familyOf, outcome' = outcome,
@@ -208,4 +221,26 @@ module consensus {
 
   // break-glass is disabled until a deadlock is detected (deadlockDetected is false at genesis).
   run breakGlassGatedTest = init.then(breakGlass.fail())
+
+  // ROB-04 tightening (FINDINGS.md §6 follow-up): the deadlock monitor cannot fire at genesis,
+  // before any council round has completed — no seat has voted, so the full-cast guard fails.
+  run deadlockNeedsCompletedRoundTest = init.then(detectDeadlock.fail())
+
+  // ...but after a genuine full-council round that mechanically fails to commit (unanimous
+  // Reject -> Rejected), the monitor becomes enabled, and break-glass recomposition is then
+  // reachable (council widens to {..6,7}). This is the completed-round path the tightened
+  // guard now requires — proving the tightening did not sever the legitimate recovery route.
+  run deadlockAfterFailedRoundEnablesBreakGlassTest =
+    init.then(verify(Residual))
+        .then(castVote(1,Reject)).then(castVote(2,Reject)).then(castVote(3,Reject))
+        .then(castVote(4,Reject)).then(castVote(5,Reject)).then(decide)
+        .then(detectDeadlock)
+        .then(breakGlass)
+        .then(all {
+          assert(deadlockDetected and 6.in(council) and 7.in(council) and outcome == Escalated),
+          author' = author, council' = council, tier' = tier, verification' = verification,
+          votes' = votes, weight' = weight, familyOf' = familyOf, outcome' = outcome,
+          coverageHigh' = coverageHigh, blastHigh' = blastHigh, burnIn' = burnIn,
+          deadlockDetected' = deadlockDetected,
+        })
 }

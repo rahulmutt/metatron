@@ -3,7 +3,7 @@ id: ROB-09
 title: Mailbox does not state that a node's Blocked state is the conjunction of all its gating Questions
 severity: high
 category: robustness
-status: open
+status: resolved
 affected_specs: [06-interaction-and-mailbox.md]
 review_verdict: MODEL-SURFACED
 ---
@@ -12,11 +12,15 @@ review_verdict: MODEL-SURFACED
 
 ## Status
 
-**Open.** Surfaced by formal modeling (Apalache bounded model checking of
+**Resolved.** Surfaced by formal modeling (Apalache bounded model checking of
 `specs/quint/mailbox.qnt`, Metatron Quint spec suite, Task 8), not by the original
-adversarial spec review. Not yet resolved in `specs/06-interaction-and-mailbox.md`
-prose — this file records the finding and a suggested resolution for the spec owner;
-`specs/*.md` was intentionally left untouched.
+adversarial spec review. The clarification below has now been applied to
+`specs/06-interaction-and-mailbox.md`: §3.4's gating-edge bullet now states that a
+node's `Blocked` state is the **conjunction over all of its currently-active gating
+edges** (active = `OPEN` **or** safe-held `CLOSED` per §2.4), with a matching
+cross-reference added to §2.4's high-stakes hold-and-degrade bullet. The Quint model
+(`specs/quint/mailbox.qnt`) already enforces this semantics (findings F4/F5), so spec
+and model now agree.
 
 ## What the model found
 
