@@ -156,9 +156,9 @@ enum BudgetRemedy { TopUpGlobal, Reallocate, Cancel }
 - **Ownership:** governed state (configuration layer) with **tiered writes** — reuses the existing write-path machinery. *(Rejected: always-consensus — UX-03 throughput risk; Guardian-owned overlay — budget authority outside propose≠dispose and the audit trail.)*
 - **Allocation model:** **reserved floor + shared burst**, with a token bucket for rate. *(Rejected: hard partition — strands budget across a churning org-chart and needs a write per spawn; pure overcommit — a runaway can starve the kernel and deadlock governance.)*
 - **Depletion behavior:** layered — soft threshold → cooperative drain → checkpoint-or-freeze → hard-cancel backstop; throttle (not pause) for rate. *(Rejected: always-hard-cancel — loses partial work, unsafe mid external call; checkpoint-required — thin harnesses cannot checkpoint.)*
-- **Notifier:** deterministic, off-budget, typed-template, two-tier. *(No alternative was acceptable: an LLM-authored notification introduces fabrication risk on the one message a real funding decision rests on; an on-budget notifier deadlocks at zero balance.)*
-- **Rate:** first-class alongside stock, via token bucket; throttle on breach, escalate only on sustained throttle. *(Rejected: rate-as-advisory-only — gives no mechanical back-pressure; rate-pause-not-throttle — unnecessary for transient, self-healing breaches.)*
-- **Unit:** normalized `CostUnit` (RD-4), tokens dominant. *(Rejected: raw-token denomination — breaks wall-clock-billed and thin harnesses; per-harness units — prevents roll-up across heterogeneous harnesses.)*
+- **Notifier:** deterministic, off-budget, typed-template, two-tier. *(Rejected: LLM-authored notification — fabrication risk on the one message a real funding/operational decision rests on; on-budget notifier — deadlocks at zero balance.)*
+- **Rate:** first-class alongside stock, via token bucket; throttle on breach, escalate only on sustained throttle. *(Rejected: rate-pause-not-throttle — unnecessary for transient, self-healing breaches.)*
+- **Unit:** normalized `CostUnit` (RD-4), tokens dominant. *(Rejected: raw-token denomination — breaks wall-clock-billed and thin harnesses.)*
 
 ---
 
