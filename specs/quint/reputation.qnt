@@ -1,4 +1,4 @@
-// # VERIFY: weightBounded, driftDecaysWeight
+// # VERIFY: weightBounded, driftDecaysWeight, swingResistance
 module reputation {
   import base.* from "./base"
 
@@ -69,6 +69,21 @@ module reputation {
     weight.keys().forall(a =>
       driftCount.get(a) >= DRIFT_LIMIT implies weight.get(a) <= DRIFT_WEIGHT_CAP)
 
+  // summed weight of drift-flagged agents (tainted = a persistent drifter)
+  def taintedWeight =
+    council.filter(a => driftCount.get(a) >= DRIFT_LIMIT)
+           .fold(0, (s, a) => s + weight.get(a))
+  def totalWeight = council.fold(0, (s, a) => s + weight.get(a))
+
+  // HEADLINE: even if the ENTIRE drift-flagged bloc votes Approve, its combined weight
+  // cannot meet the 2/3 ordinary threshold — a correlated, persistently-wrong bloc
+  // cannot unilaterally carry a proposal (the ROB-02 "correlated bloc loses its teeth"
+  // claim). Checked against base.passesOrdinary — the SAME predicate consensus.qnt's
+  // `decide` uses — so the swing test and the live threshold cannot silently diverge.
+  // Reasons in ABSOLUTE threshold terms, so a too-slow DECAY (which merely raises the
+  // derived DRIFT_WEIGHT_CAP) is caught here as a reachable counterexample (Task 6).
+  val swingResistance = not(passesOrdinary(taintedWeight, totalWeight))
+
   // --- scenarios ---
   // Decay-to-floor is REACHED, not just bounded: agent 1, observed wrong DRIFT_LIMIT
   // times from START=4 (4 -> 2 -> 0 -> 0), lands at weight 0 with driftCount 3.
@@ -76,6 +91,19 @@ module reputation {
     init.then(observeWrong(1)).then(observeWrong(1)).then(observeWrong(1))
         .then(all {
           assert(weight.get(1) == 0 and driftCount.get(1) == DRIFT_LIMIT),
+          weight' = weight, driftCount' = driftCount,
+        })
+
+  // Non-vacuity witness for swingResistance: drive the WHOLE bloc {1,2,3,4} past
+  // DRIFT_LIMIT so the tainted set is non-empty, then assert the invariant holds over a
+  // real tainted council (each bloc agent at weight 0; anchor 5 still at START).
+  run blocDefangedTest =
+    init.then(observeWrong(1)).then(observeWrong(2)).then(observeWrong(3)).then(observeWrong(4))
+        .then(observeWrong(1)).then(observeWrong(2)).then(observeWrong(3)).then(observeWrong(4))
+        .then(observeWrong(1)).then(observeWrong(2)).then(observeWrong(3)).then(observeWrong(4))
+        .then(all {
+          assert(council.filter(a => driftCount.get(a) >= DRIFT_LIMIT) == bloc
+                 and swingResistance),
           weight' = weight, driftCount' = driftCount,
         })
 }
