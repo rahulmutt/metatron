@@ -290,6 +290,16 @@ struct Scope { resource: McpServerId, methods: Vec<MethodPattern> }
 /// External users are a SEPARATE principal type (NOT AgentId). The system is multi-user.
 struct UserPrincipal { id: ExternalUserId, scopes: Vec<AuthorizationScope> }
 
+/// A concrete transport a user reaches the system through (API, Slack, Telegram, …).
+/// The Interaction plane (06 §4.5) plugs one ChannelAdapter in per ChannelKind;
+/// the deliberative core stays transport-agnostic.
+type ChannelId = Hash;
+enum ChannelKind { Api, Slack, Telegram, Sms, Other(String) }
+
+/// An authenticated channel-native sender, resolved to an ExternalUserId via the
+/// 08-owned binding table (08 §3.9). Default binding is deterministic 1:1.
+struct ChannelIdentity { channel_kind: ChannelKind, native_id: Text, auth_evidence: Bytes }
+
 /// The user-deployed, separately-trusted MCP gateway. Gateway-only: all downstream
 /// MCP calls are brokered through it; agents never receive a downstream token.
 trait McpAuthProxy {
@@ -357,6 +367,8 @@ struct RateBudget { sustained: CostRate, burst_depth: CostUnit }
 | **Tier / JIT / Trap / Deopt** | Execution tier (0 interpreter / 1 memoized / 2 synthesized); compiling stable behavior; a guard; the fallback to a lower tier. v1 ships Tier-0 + Tier-1; **Tier-2 is deferred** (OE-03). |
 | **Constitutional amendment** | A change to kernel-role membership; higher consensus threshold. |
 | **Mailbox** | The notification/question channel between the system and the user. |
+| **Channel** | A concrete transport a user reaches the system through — HTTP API, Slack, Telegram, SMS. The Interaction plane's external boundary is pluggable across channels (`06` §2.6, §4.5). |
+| **Channel Adapter** | The translation shell (one per `ChannelKind`) outside the Guardian that authenticates a channel-native sender, resolves it to an `ExternalUserId`, normalizes inbound events into canonical `Instruction`/`Answer`, and renders `Question`/`Notification` to native form. The user-connection analogue of `AgentHarness` (`04`). |
 | **External user / `UserPrincipal`** | A human user of the system — a *separate* principal type from `AgentId`. The system is **multi-user**: concurrent users with per-user mailboxes and authorization scopes. |
 | **SVID** | A SPIFFE Verifiable Identity Document: an agent's short-lived, auto-rotating operational credential, issued by SPIRE after the Metatron workload attestor validates it against the current head. |
 | **Workload attestation** | The check (agent exists in config layer, holds its key, above reputation floor, not quarantined) gating SVID issuance — binding the runtime workload to the governed on-chain identity; also the Sybil gate. |
