@@ -1,5 +1,5 @@
 [tools]
-"npm:@informalsystems/quint" = "0.24.0"
+"npm:@informalsystems/quint" = "0.32.0"
 "java" = "temurin-21"
 
 [env]
