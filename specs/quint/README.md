@@ -18,21 +18,24 @@ specs/quint/
   mailbox.qnt             # 06 — blocking mailbox, correlation tokens    — written, verified
   budgets.qnt             # 10 — hierarchical stock+rate, layered stop   — written, verified
   reputation.qnt          # 08 — reputation decay + swing-resistance     — written, verified
+  sentinel.qnt            # 07/08 — Sentinel->reputation gate; ROB-06 re-check  — written, verified
   smoke.qnt               # toolchain smoke test (this task)
   verify.sh               # runs `quint verify` over every module's declared invariants
   README.md               # this file
 ```
 
-All six modules above are implemented and green (typecheck + test + `quint verify`);
+All seven modules above are implemented and green (typecheck + test + `quint verify`);
 see `FINDINGS.md` for the authoritative per-module status and per-invariant results.
 
 Coverage is the core governance spine: shared `base` (from `00`) plus four subsystem
 modules — `01` state-model, `02` consensus, `06` interaction/mailbox, `10` budgets.
 `reputation.qnt` (from `08`) is a later addition that extends the suite beyond that
 original four-module spine, modeling `08`'s decay-toward-zero-influence claim
-(`00 §6` principle 4) as a falsifiable swing-resistance property. Other subsystems
-(`03`, `04`, `05`, `07`, `09`, and the rest of `08`) remain out of scope for now; the
-suite is structured to extend to them later. Each subsystem module imports only
+(`00 §6` principle 4) as a falsifiable swing-resistance property. `sentinel.qnt`
+(from `07`/`08`) is a further addition, modeling the Sentinel→reputation gate slice
+of those specs (the ROB-06 re-check) as a bounded adversarial state machine. Other
+subsystems (`03`, `04`, `05`, `09`, and the rest of `07`/`08`) remain out of scope
+for now; the suite is structured to extend to them later. Each subsystem module imports only
 `base` — cross-subsystem concepts are modeled as abstract oracles/parameters, not real
 imports, so every module stays independently falsifiable and model-checkable.
 
@@ -42,6 +45,13 @@ This `{5}` observed-right-only shape is a deliberate bound that scopes swing-res
 to the sub-majority-bloc threat (a correlated minority trying to swing a vote) — it does
 not model full council capture (all 5 agents drifting in correlated lockstep), which is
 break-glass/ROB-04 territory and out of scope here.
+
+**Abstraction note (`sentinel.qnt`):** ground-truth guilt is the empty set and the one
+honest Sentinel `{103}` only ever targets the guilty, so the honest-Sentinel and G0 paths
+never fire in the adversarial `step` — deliberately isolating "can the compromised path move
+weight without a sound justification?". Those paths are kept non-vacuous by dedicated
+witnesses (`singleFindingInertTest`, `soundSlashReachableTest`). Sentinel ids are offset
+10x from council ids so the two id spaces never alias in the `findings` pair set.
 
 `smoke.qnt` is scaffolding for this task only: it proves the pinned toolchain
 (typecheck / test / Apalache verify) actually runs end-to-end before any real subsystem
