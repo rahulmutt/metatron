@@ -17,20 +17,31 @@ specs/quint/
   consensus.qnt          # 02 — 6-layer funnel, propose≠dispose, quorum  — written, verified
   mailbox.qnt             # 06 — blocking mailbox, correlation tokens    — written, verified
   budgets.qnt             # 10 — hierarchical stock+rate, layered stop   — written, verified
+  reputation.qnt          # 08 — reputation decay + swing-resistance     — written, verified
   smoke.qnt               # toolchain smoke test (this task)
   verify.sh               # runs `quint verify` over every module's declared invariants
   README.md               # this file
 ```
 
-All five modules above are implemented and green (typecheck + test + `quint verify`);
+All six modules above are implemented and green (typecheck + test + `quint verify`);
 see `FINDINGS.md` for the authoritative per-module status and per-invariant results.
 
 Coverage is the core governance spine: shared `base` (from `00`) plus four subsystem
 modules — `01` state-model, `02` consensus, `06` interaction/mailbox, `10` budgets.
-Other subsystems (`03`, `04`, `05`, `07`, `08`, `09`) are out of scope for this pass;
-the suite is structured to extend to them later. Each subsystem module imports only
+`reputation.qnt` (from `08`) is a later addition that extends the suite beyond that
+original four-module spine, modeling `08`'s decay-toward-zero-influence claim
+(`00 §6` principle 4) as a falsifiable swing-resistance property. Other subsystems
+(`03`, `04`, `05`, `07`, `09`, and the rest of `08`) remain out of scope for now; the
+suite is structured to extend to them later. Each subsystem module imports only
 `base` — cross-subsystem concepts are modeled as abstract oracles/parameters, not real
 imports, so every module stays independently falsifiable and model-checkable.
+
+**Abstraction note (`reputation.qnt`):** the council fixture is a 4-agent correlatable
+`bloc {1,2,3,4}` plus a single honest anchor `{5}` that is only ever observed right.
+This `{5}` observed-right-only shape is a deliberate bound that scopes swing-resistance
+to the sub-majority-bloc threat (a correlated minority trying to swing a vote) — it does
+not model full council capture (all 5 agents drifting in correlated lockstep), which is
+break-glass/ROB-04 territory and out of scope here.
 
 `smoke.qnt` is scaffolding for this task only: it proves the pinned toolchain
 (typecheck / test / Apalache verify) actually runs end-to-end before any real subsystem

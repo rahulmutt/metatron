@@ -3,8 +3,9 @@
 Traceability report for the modular Quint spec suite in `specs/quint/`. This is the
 suite's report-back to the prose specs (see `specs/quint/README.md` and the design doc
 `docs/superpowers/specs/2026-07-01-metatron-quint-spec-suite-design.md`). It records,
-for every model-checked invariant and every scenario test across all five modules:
-what was checked, against which spec section, by what method, and the result.
+for every model-checked invariant and every scenario test across all six verified
+modules (plus shared `base`): what was checked, against which spec section, by what
+method, and the result.
 
 **The original report was additive-only** — no `specs/*.md` prose body was edited to produce
 it, and its only new file under `specs/issues/` was ROB-09 (§4 below). A subsequent
@@ -12,6 +13,12 @@ it, and its only new file under `specs/issues/` was ROB-09 (§4 below). A subseq
 flagged: it applied the ROB-09 clarification to `specs/06-interaction-and-mailbox.md` prose
 (§4) and tightened `detectDeadlock` in `consensus.qnt` (§6). Facts changed by that pass are
 updated in place below with an **_Update (follow-up):_** marker; §9 records the delta.
+
+**A second, later addition (2026-07-01, `reputation.qnt` — see §2.6, §3's F6, and §4)**
+extended the suite with a new `08`-derived module beyond the original four-subsystem spine
+(`01`/`02`/`06`/`10`). It is likewise additive-only to `specs/*.md` prose; its one new file
+under `specs/issues/` is ROB-10 (§4). Facts changed by that addition are marked
+**_Update (Task 8):_** below.
 
 ---
 
@@ -25,6 +32,10 @@ Exit code 0. All 5 modules (`base.qnt`, `budgets.qnt`, `consensus.qnt`, `mailbox
 `smoke.qnt`, `state_model.qnt` — 6 files) typecheck cleanly (Quint prints nothing on a
 clean typecheck; absence of `[QNT...]` error output + exit 0 is the pass signal, consistent
 with every prior task report in this suite).
+
+**_Update (Task 8):_** re-run after `reputation.qnt` was added — exit code 0, all 6 verified
+modules (`base.qnt`, `budgets.qnt`, `consensus.qnt`, `mailbox.qnt`, `reputation.qnt`,
+`state_model.qnt`, plus `smoke.qnt` — 7 files) typecheck cleanly. No `[QNT...]` output.
 
 ### 1.2 `mise run quint-test`
 
@@ -41,6 +52,13 @@ Exit code 0. **30 test-invocations passing, 0 failing**, across 6 files (22 uniq
 | smoke.qnt | 1 | countsUpTest |
 | state_model.qnt | 6 | (2 inherited) + casSerializesTest (10000 randomized runs), cycleRejectedTest, blockedCannotFinishTest, i3EvasionRejectedTest |
 
+**_Update (Task 8):_** re-run after `reputation.qnt` was added — exit code 0, **35
+test-invocations passing, 0 failing**, across 7 files (25 unique scenarios).
+
+| Module | Passing | Breakdown |
+|---|---|---|
+| reputation.qnt | 5 | (2 inherited) + chronicDriftReachesFloorTest, blocDefangedTest, honestAnchorSurvivesTest |
+
 ### 1.3 `mise run quint-verify` (Apalache 0.47.2, bounded model checking)
 
 Ran in the **background**, foreground-polled to completion (not backgrounded-and-abandoned) — total wall clock **~10m0s**. `specs/quint/verify.sh` runs under `set -euo pipefail`, so any module failure would have stopped the whole run; it ran to the end, confirming all 6 passes below completed. Every pass below is verbatim `[ok] No violation found` — **zero counterexamples in the final, shipped state of the suite** (the counterexamples that *were* found during development, F1-F5, are documented in §3 and were all fixed before this run).
@@ -55,6 +73,20 @@ Ran in the **background**, foreground-polled to completion (not backgrounded-and
 | 6 | `state_model.qnt` `[step=taskStep, max-steps=4]` | taskDagAcyclic, blockedTaskSafety | 4 | **NoError** | 8.2s |
 
 **Result: every module is green at its declared (possibly bounded) depth. No STOP condition was hit — the suite gate is fully passing.**
+
+**_Update (Task 8, 2026-07-01 — `reputation.qnt` added):_** the full 7-module gate (this report's original 6 plus the new `reputation.qnt`) was re-run to completion, foreground-polled, all passes verbatim `[ok] No violation found`, total wall clock **15m9s**. `reputation.qnt` alone accounted for ~12.6 of those ~15 minutes (its `swingResistance` invariant, exercised over the full bloc-vs-anchor fixture, is the most expensive single pass in the suite). The other six modules' individual timings shifted slightly (normal run-to-run variance, same bounded depths, same `[ok]` outcome) — updated below; no invariant, depth, or outcome changed for any of the six.
+
+| # | Pass | Invariants | Depth | Outcome | Wall time (Task 8 re-run) |
+|---|---|---|---|---|---|
+| 1 | `budgets.qnt` | stockNeverExceedsCap, childFloorsFitParent, kernelFloorAvailable, bucketWithinCapacity, layeredStopOrdering, notifierIsOffBudget | default (reached step 10) | **NoError** | 63.1s |
+| 2 | `consensus.qnt` `[max-steps=10]` | proposerNotDisposer, verifyBeforeVote, refutedNeverCommits, quorumAndThreshold, noAutonomousLowCoverageHighBlast, mechanicalTiering, breakGlassOnlyOnDeadlock | 10 | **NoError** | 27.4s |
+| 3 | `mailbox.qnt` `[max-steps=6]` | corrInjective, answerClearsOwnNode, gatingConsistent, bindingIs1to1, precedenceNoDeadlock | 6 | **NoError** | 23.3s |
+| 4 | `reputation.qnt` (no explicit `max-steps` override; `# VERIFY:` header only) | weightBounded, driftDecaysWeight, swingResistance | default (reached step 10) | **NoError** | 753.9s (≈12.6 min) |
+| 5 | `smoke.qnt` | nonNegative | default | **NoError** | 4.1s |
+| 6 | `state_model.qnt` (default step) | headReachable, linearSpine, gapFreeTime, constitutionalIffKernel, constitutionalFlagHonest | default (reached step 10) | **NoError** | 24.0s |
+| 7 | `state_model.qnt` `[step=taskStep, max-steps=4]` | taskDagAcyclic, blockedTaskSafety | 4 | **NoError** | 8.0s |
+
+**Result (Task 8): every module — all 7, including the new `reputation.qnt` — is green at its declared (possibly bounded) depth. No STOP condition was hit; `verify.sh` ran under `set -euo pipefail` to completion. The suite gate is fully passing.**
 
 (Benign `io.netty`/gRPC/HTTP2 stack-trace noise appears throughout the log — this is Apalache's local gRPC health-check probe failing harmlessly on shutdown, documented as expected in every prior task report and the README; it does not affect the `NoError` outcomes above.)
 
@@ -135,24 +167,44 @@ Columns: `Invariant | Spec §` | `Method` | `Result` | `Note`. Grouped by module
 | deadlockNeedsCompletedRoundTest | `02` §10.4 (ROB-04 §9 tightening) | scenario | holds | `detectDeadlock` is guard-disabled at genesis — no seat has voted, so the completed-round guard fails. |
 | deadlockAfterFailedRoundEnablesBreakGlassTest | `02` §10.4 (ROB-04 §9 tightening) | scenario | holds | After a unanimous-Reject full round (-> Rejected), `detectDeadlock` enables and break-glass widens council to {..6,7} — the legitimate recovery route survives the tightening. |
 
-### 2.6 smoke.qnt (toolchain scaffold — no spec §, infra only)
+### 2.6 reputation.qnt (`08` — reputation decay + swing-resistance; Task 8 addition)
+
+| Invariant / Test | Spec § | Method | Result | Note |
+|---|---|---|---|---|
+| weightBounded | `08` §3.3 (reputation as trust substrate) / `00` §7 (`Reputation` canonical type, calibrated in `[0,1]`; modeled here as an integer proxy `[0, CAP]`, mirroring `base.qnt`'s `CostUnit` convention) | MC (default depth) | holds | Well-formedness bound — weight never leaves `[0, CAP]` under any reachable trace of `observeWrong`/`observeRight`/`idle`. |
+| driftDecaysWeight | `00` §6 principle 4 ("chronically-drifting agents decay toward zero influence automatically") / ROB-03 | MC (default depth) | holds | A persistent drifter (`driftCount >= DRIFT_LIMIT`) is provably bounded by the derived `DRIFT_WEIGHT_CAP = max(0, CAP - DRIFT_LIMIT*DECAY)`; holds by construction for any `DECAY` value — a well-formedness check on the update rule (catches a mis-wired decay/reset), deliberately distinct from `swingResistance`'s tuning-sensitivity check below. |
+| swingResistance | `00` §6 principle 4 / ROB-01 / ROB-02 | MC (default depth) | holds | **HEADLINE.** `not(passesOrdinary(taintedWeight, totalWeight))`, checked against `base.passesOrdinary` — the same predicate `consensus.qnt`'s `decide` uses. At the shipped calibration (`CAP=6, DECAY=2, DRIFT_LIMIT=3`) the entire drift-flagged bloc `{1,2,3,4}` cannot meet the ⅔ ordinary threshold, even when the whole bloc is genuinely tainted (`blocDefangedTest`). **This is a calibration-dependent guarantee, not an unconditional one** — see F6 (§3) and `specs/issues/ROB-10-reputation-decay-threshold-coupling.md` for the `DECAY=1` counterexample that falsifies it and the decay/threshold coupling it exposes. |
+| chronicDriftReachesFloorTest | `00` §6 principle 4 (decay dynamics — reached, not merely bounded) | scenario | holds | Agent 1 observed wrong `DRIFT_LIMIT=3` times from `START=4` (`4 -> 2 -> 0 -> 0`): lands at weight 0, `driftCount 3` — the floor is genuinely reached. |
+| blocDefangedTest | `00` §6 / ROB-01 / ROB-02 (non-vacuity witness for `swingResistance`) | scenario | holds | Drives the WHOLE bloc `{1,2,3,4}` past `DRIFT_LIMIT` (12 `observeWrong` actions), then asserts `swingResistance` holds over a genuinely, non-vacuously tainted council. |
+| honestAnchorSurvivesTest | design doc §Fixture rationale (honest anchor `{5}` keeps `totalWeight > 0`, avoiding the degenerate full-capture case) | scenario | holds | Agent 5, observed right, retains `>= START` weight while bloc agents 1 and 2 drift — `swingResistance` is never checked against a degenerate zero-weight council. |
+
+### 2.7 smoke.qnt (toolchain scaffold — no spec §, infra only)
 
 | Invariant / Test | Spec § | Method | Result | Note |
 |---|---|---|---|---|
 | nonNegative | — (toolchain smoke test) | MC | holds | Proves the pinned Quint/Apalache toolchain runs end-to-end. |
 | countsUpTest | — | scenario | holds | |
 
-**Row count: 48** (26 MC invariant rows + 22 scenario/sim rows) across all 5 verified modules plus `base`'s 2 imported scenarios — was 46 before the §9 follow-up added two consensus deadlock-gating scenarios.
+**Row count: 54** (29 MC invariant rows + 25 scenario/sim rows) across all 6 verified modules
+plus `base`'s 2 imported scenarios — was 48 before Task 8 added `reputation.qnt`'s 3 MC
+invariant rows + 3 scenario rows (was 46 before the §9 follow-up added two consensus
+deadlock-gating scenarios).
 
 ---
 
-## 3. Headline findings — plan-code bugs the model surfaced (F1-F5)
+## 3. Headline findings — plan-code bugs the model surfaced (F1-F6)
 
-These are the suite's core value: real bugs in the plan's Quint transcription, each caught
-by Apalache returning a genuine counterexample, each fixed with a minimal, documented diff
-(the invariant text itself was never weakened to force a pass — only the buggy action/guard
-was corrected). All five are **modeling/transcription artifacts in this Quint suite's own
-code**, not defects in the `specs/*.md` prose (judged individually in §4).
+F1-F5 are the suite's original core value: real bugs in the plan's Quint transcription, each
+caught by Apalache returning a genuine counterexample, each fixed with a minimal, documented
+diff (the invariant text itself was never weakened to force a pass — only the buggy
+action/guard was corrected). All five are **modeling/transcription artifacts in this Quint
+suite's own code**, not defects in the `specs/*.md` prose (judged individually in §4).
+
+**F6 (added Task 8) is different in kind** — not a bug in this suite's Quint code (the shipped
+`reputation.qnt` module is correct and green at its shipped calibration), but a **calibration/
+coupling finding**: a falsifiability probe that mutates a tuning parameter and shows the
+model's own headline safety property (`swingResistance`) is conditional on that parameter,
+a precondition the prose narrative states only qualitatively. See below and §4.
 
 **F1 — budgets.qnt, `kernelFloorAvailable` (Task 3).** The original `breaksKernelFloor` guard
 computed a kernel node's post-charge headroom using the **pre-charge** `subtreeSpend`,
@@ -200,6 +252,42 @@ reduces exactly to the prior form whenever no `Closed` question exists), and add
 non-vacuously exercising `Closed` states. Method: MC. **This finding is the strongest
 candidate for a genuine spec-prose clarification — see §4.**
 
+**F6 — reputation.qnt, `swingResistance` decay/threshold coupling (reputation plan Task 6) —
+CALIBRATION-COUPLING FINDING, not a code bug.** `00` §6 principle 4 and `08` §3.3/§3.7 make a
+**qualitative** claim: chronically-drifting agents "decay toward zero influence
+automatically," so a correlated drifting bloc "loses its teeth" (ROB-02 framing). The prose
+nowhere states the **quantitative precondition** the claim actually depends on: the decay
+rate must be fast enough, relative to the ⅔ ordinary-pass threshold and the drift-detection
+lag, that a fully drift-flagged bloc's *residual* weight cannot still sum past the threshold.
+`reputation.qnt`'s `swingResistance` invariant makes this falsifiable. At the shipped
+calibration (`CAP=6, DECAY=2, DRIFT_LIMIT=3`) the derived ceiling
+`DRIFT_WEIGHT_CAP = max(0, CAP - DRIFT_LIMIT*DECAY) = 0`, so every tainted agent is pinned to
+weight 0 and `swingResistance` holds robustly, non-vacuously (`blocDefangedTest` drives the
+whole bloc `{1,2,3,4}` tainted; `quint verify` confirms `[ok]` over the full step relation,
+§1.3 row 4). **Falsifiability was then demonstrated with a deterministic concrete witness**
+(not a plain default-depth `quint verify`, which is misleading here — see below): with
+`DECAY` temporarily mutated to `1` (module reverted after; the shipped module is unchanged),
+`quint test` drove each of the four bloc agents up to `CAP=6` via `observeRight`, then
+`observeWrong` `DRIFT_LIMIT=3` times each, landing every bloc agent at weight `3`
+(`driftCount=3`, drift-flagged) while the honest anchor `{5}` stayed untouched at `START=4`:
+`taintedWeight = 4*3 = 12`, `totalWeight = 12+4 = 16`, and
+`passesOrdinary(12,16)` = `3*12=36 >= 2*16=32` = **true** — so `swingResistance` is **false**:
+a persistently-wrong, correlated bloc *does* clear the ⅔ threshold at this calibration. So the
+"decay to zero influence" guarantee holds only while
+`|bloc| * max(0, CAP - DRIFT_LIMIT*DECAY)` stays below the ⅔ margin of total council weight —
+true at `DECAY=2` (`0 < 8`), false at `DECAY=1` (`36 >= 32`). **Noteworthy: this fragility is
+invisible at the default BMC gate.** The `DECAY=1` counterexample state is only reachable
+after the bloc first climbs to `CAP` and then drifts down — a trace of roughly 20 steps — so a
+plain `quint verify --invariant=swingResistance` at `DECAY=1` and Apalache/quint's default
+`--max-steps=10` returns `[ok] No violation found`, misleadingly implying safety at a
+calibration that is not actually safe; only the deeper, deterministic concrete-witness
+`quint test` trace surfaces it. Method: **concrete-witness `quint test`** (not MC — the
+counterexample lies past the default BMC depth). Filed:
+**`specs/issues/ROB-10-reputation-decay-threshold-coupling.md`** (new file; distinct from
+ROB-02 — ROB-02 is the *undetected/novel* correlated-failure risk, ROB-10 is the complementary
+*detected/already-priced* drift case, where down-weighting is happening but is not
+automatically calibrated to defang the bloc). See §4 for the spec-gap judgment.
+
 ---
 
 ## 4. Spec-gap judgment and issue filing
@@ -236,8 +324,34 @@ artifact in this Quint suite's own plan code (now fixed, no prose defect)?
   `CLOSED` per §2.4), with a matching cross-reference added to §2.4's high-stakes bullet.
   ROB-09 is now `status: resolved`; spec prose and the Quint model now agree.
 
+- **F6 (Task 8) — GENUINE SPEC-PROSE CLARIFICATION CANDIDATE, distinct in kind from F1-F5.
+  Issue filed.** Unlike F1-F5, F6 is not a bug in this suite's own Quint code — the shipped
+  `reputation.qnt` module is correct, and `swingResistance` genuinely `holds` at its shipped
+  calibration (§2.6). The gap is in the prose: `00` §6 principle 4 and `08` §3.3/§3.7 state
+  "decay toward zero influence" / "decay toward the class prior" as an unconditional-sounding
+  qualitative guarantee, but the guarantee is actually **conditional** on a quantitative
+  relationship between the decay rate, the drift-detection lag, and the ⅔/¾ pass thresholds —
+  a precondition the prose never states. The Quint model's `DECAY=1` concrete-witness
+  counterexample (F6 above) makes that missing precondition concrete and falsifiable. Filed:
+  **`specs/issues/ROB-10-reputation-decay-threshold-coupling.md`** (new file; `specs/*.md`
+  prose left untouched, per this task's additive-only constraint — status `open`, not yet
+  applied). Suggested resolution (per the issue): state the decay-rate precondition alongside
+  the qualitative claim in **`00` §6 (principle 4)** — the issue file's own text cites `00
+  §6.4`, but `00` §6 ("Cross-cutting Design Principles") is a flat numbered list with no `§6.4`
+  heading, so that citation is read here as "principle 4 of `00` §6," not a literal
+  subsection — or wherever the decay schedule is normatively tuned, and cross-reference it
+  from ROB-03 (reputation's burn-in/cold-start finding, which this complements rather than
+  duplicates: ROB-03 is about reputation being *inert* early; ROB-10 is about reputation being
+  *insufficiently defanging* even once it has data, if mis-calibrated).
+  **Distinct from ROB-02:** ROB-02 is the *undetected/novel* correlated-failure risk (no track
+  record exists to price against); ROB-10 is the complementary *detected/already-priced* case
+  — the bloc is drift-flagged, reputation *is* down-weighting it, and the down-weighting still
+  fails to defang the bloc unless the decay rate is calibrated against the pass threshold.
+  ROB-02's mitigation (measured decorrelation) does not address ROB-10; it is a precondition on
+  the decay dynamics themselves.
+
 No other `violated`/`caveat` rows exist in the final suite (all rows in §2 are `holds`),
-so F1-F5 are the complete set of judged findings.
+so F1-F6 are the complete set of judged findings.
 
 ---
 
@@ -258,11 +372,23 @@ Apalache actually explored:
 | mailbox.qnt | **max-steps = 6** (declared) | `# VERIFY-MAX-STEPS: 6` — default depth 10 was INTRACTABLE for mailbox's tuple-keyed maps (held through state 8, no `NoError` in 280s); depth 6 is sound and covers the bounded 2-question/2-user/2-node domain |
 | consensus.qnt | **max-steps = 10** (declared) | `# VERIFY-MAX-STEPS: 10` — ~6m50s at this depth; not deepened further for tractability |
 | smoke.qnt | Apalache default | trivial single-counter model |
+| reputation.qnt | Apalache default (reached step 10; no `max-steps` override declared) | 6-member fixture (`bloc {1,2,3,4}` + anchor `{5}`), `CAP=6`; `swingResistance` alone took **753.9s (≈12.6min)** at this depth (§1.3) |
 
 A property violation that only manifests **beyond** the explored depth, or outside the
 declared bounded domains (more than 3 agents, more than 5+2 council seats, etc.), cannot be
 ruled out by this suite. This is disclosed as a limitation of bounded model checking, not
 papered over — consistent with every per-task report's own "Concerns" section.
+
+**Concrete instance of this caveat, not hypothetical (Task 8, F6/§3, §4):** at the *shipped*
+calibration (`DECAY=2`), `swingResistance` genuinely `[ok]`s at the default 10-step depth —
+that result is trustworthy on its own terms. But probing a mutated calibration (`DECAY=1`,
+reverted; module unchanged) showed the *general risk* this caveat describes is not academic
+for `reputation.qnt`: the `DECAY=1` violating trace needs ~20 steps, past the depth a default
+`quint verify` explores, so a default-depth verify at that calibration would have printed
+`[ok]` while a real violation existed one BFS-doubling away. The suite did not rely on that
+misleading `[ok]` — the falsification instead used a deterministic concrete-witness `quint
+test` trace (§3, F6) — but it is recorded here as the sharpest real illustration in this suite
+of why a bounded-depth `[ok]` is not a safety proof.
 
 ---
 
@@ -319,15 +445,17 @@ bounded model, recorded here as evidence (not new findings):
 | I4 (task DAG acyclicity) | `01` §4.2 | state_model.qnt | `taskDagAcyclic` MC (taskStep) + `cycleRejectedTest` |
 | I6 (blocked task cannot reach Done) | `01` §4.2 | state_model.qnt | `blockedTaskSafety` MC (taskStep) + `blockedCannotFinishTest` |
 | A never-answered high-stakes Question resolves to a bounded safe fallback (never blocks indefinitely) and the gated node holds rather than proceeding | UX-04 (`06` §2.4) | mailbox.qnt | `neverAnsweredResolvesTest` |
+| A drift-flagged, correlated bloc's combined reputation weight cannot meet the ⅔ ordinary threshold, at the shipped decay calibration | `00` §6 principle 4, ROB-01/ROB-02 | reputation.qnt | `blocDefangedTest` + `swingResistance` MC (see F6/§3 and ROB-10 for the calibration-dependence caveat on this claim) |
 
 ---
 
 ## 8. Summary
 
-- Suite gate: **typecheck 5/5 modules clean, test 30/30 (22 unique scenarios) passing,
-  verify 6/6 passes NoError** — the suite is fully green (test count updated by the §9
-  follow-up; was 28/20 as originally shipped).
-- 48 invariant/scenario rows traced to spec sections in §2 (26 model-checked, 22
+- Suite gate: **typecheck 6/6 verified modules + smoke clean (7 files), test 35/35 (25
+  unique scenarios) passing, verify 7/7 passes NoError** — the suite is fully green (updated
+  by the Task 8 addition of `reputation.qnt`; was typecheck 5/5 (6 files), test 30/30 (22
+  unique scenarios), verify 6/6 before Task 8; test count was 28/20 before the §9 follow-up).
+- 54 invariant/scenario rows traced to spec sections in §2 (29 model-checked, 25
   scenario/sim-checked); all currently `holds`.
 - 5 real plan-code bugs (F1-F5) were caught and fixed during development; F5 is a genuine
   reachable safety bug (a safe-held high-stakes block could be wrongly released under a
@@ -337,6 +465,13 @@ bounded model, recorded here as evidence (not new findings):
   `specs/issues/ROB-09-mailbox-safe-hold-multigate.md` and **now resolved in prose** (§9).
   F1-F4 are modeling/transcription artifacts in this suite's own Quint code; no spec-prose
   issue filed for them.
+- A sixth, different-in-kind finding (F6, Task 8) is not a code bug but a **calibration/
+  coupling finding**: `reputation.qnt`'s `swingResistance` holds at the shipped calibration,
+  but a `DECAY=1` concrete-witness counterexample shows the "decay to zero influence" claim
+  (`00` §6 principle 4 / `08` §3.3) is conditional on an unstated quantitative precondition,
+  and that this fragility is invisible at the default BMC depth. Filed as
+  `specs/issues/ROB-10-reputation-decay-threshold-coupling.md` (`status: open`, prose not yet
+  updated — distinct from ROB-02's undetected/novel-correlation framing; see §4/§10).
 - All checks are bounded model checks over small fixed domains (§5) — not unbounded/inductive
   proofs. This is disclosed, not hidden.
 
@@ -372,3 +507,29 @@ residual over-approximation is left **deliberately open and documented** (§6): 
 *single* completed round, not the prose's *persistent, multi-round* split, which the bounded
 single-round funnel cannot express without a round counter + re-run loop. The direction is
 safe (antecedent still broader than the prose trigger), so no invariant is at risk.
+
+---
+
+## 10. `reputation.qnt` addition (2026-07-01, Task 8 report-back)
+
+A new module, `specs/quint/reputation.qnt`, was added to the suite — the first module beyond
+the original four-subsystem spine (`01`/`02`/`06`/`10`). It models `08`'s reputation-decay
+mechanism and `00` §6 principle 4's "decay toward zero influence" claim as three invariants
+(`weightBounded`, `driftDecaysWeight`, `swingResistance`) and three scenarios
+(`chronicDriftReachesFloorTest`, `blocDefangedTest`, `honestAnchorSurvivesTest`); full
+traceability is §2.6, the gate record is §1 (typecheck/test Task 8 updates, `[ok]` verify row
+4 in the §1.3 re-run table).
+
+Like the original report, this addition is **additive-only** to `specs/*.md` prose. Its only
+new artifact under `specs/issues/` is **ROB-10**
+(`specs/issues/ROB-10-reputation-decay-threshold-coupling.md`, `status: open`), filed from the
+headline calibration/coupling finding **F6** (§3) and judged in §4. Unlike ROB-09 (§9), ROB-10
+has **not** been applied to prose as part of this task — it is left `open` for a future pass,
+consistent with this task's brief (module + README + FINDINGS only, no `specs/*.md` prose
+edit).
+
+Full-suite re-gate after the addition (§1, Task 8 update rows): typecheck clean across all 7
+files, `quint test` **35/35** passing (25 unique scenarios), `quint verify` **7/7** passes
+`[ok] No violation found` including `reputation.qnt`'s three invariants — total wall clock
+**15m9s**, `reputation.qnt` alone **753.9s (≈12.6min)**, the most expensive single pass in the
+suite. The suite remains fully green with the addition.
