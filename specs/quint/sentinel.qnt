@@ -54,6 +54,31 @@ module sentinel {
   val weightBounded =
     weight.keys().forall(a => 0 <= weight.get(a) and weight.get(a) <= CAP)
 
+  // ROB-06's literal guarantee: a lone finding moves no weight and evicts no voter.
+  run singleFindingInertTest =
+    init.then(raiseFinding(101, 3))
+        .then(all {
+          assert(weight.get(3) == START and status.get(3) == Active
+                 and findings == Set((101, 3))),
+          weight' = weight, status' = status, findings' = findings,
+          deoptStorm' = deoptStorm, lastSlashCorroborators' = lastSlashCorroborators,
+          lastQuarantinePassedQuorum' = lastQuarantinePassedQuorum,
+        })
+
+  // A bloc Sentinel may target ANY council member; an honest Sentinel only the guilty
+  // (i.e. never, in this fixture — guilty = {}). Findings accumulate; no weight moves.
+  action raiseFinding(s: AgentId, a: AgentId): bool = all {
+    a.in(council),
+    or {
+      s.in(sBloc),
+      s.in(sHonest) and a.in(guilty),
+    },
+    findings' = findings.union(Set((s, a))),
+    weight' = weight, status' = status, deoptStorm' = deoptStorm,
+    lastSlashCorroborators' = lastSlashCorroborators,
+    lastQuarantinePassedQuorum' = lastQuarantinePassedQuorum,
+  }
+
   // temporary stutter so the module typechecks/tests before step is built (Task 6).
   action idle = all {
     weight' = weight, status' = status, findings' = findings, deoptStorm' = deoptStorm,
