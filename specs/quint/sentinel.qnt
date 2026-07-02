@@ -142,6 +142,28 @@ module sentinel {
     lastSlashCorroborators' = lastSlashCorroborators,
   }
 
+  // ONE sentinel, NO corroboration — the blessed reversible authority (08 §3.6). Raises
+  // the trap storm against the standing proposal. No DIRECT weight change (it is "reversible").
+  action emergencyDeopt(s: AgentId): bool = all {
+    or { s.in(sBloc), s.in(sHonest) },
+    deoptStorm' = deoptStorm + 1,
+    weight' = weight, status' = status, findings' = findings,
+    lastSlashCorroborators' = lastSlashCorroborators,
+    lastQuarantinePassedQuorum' = lastQuarantinePassedQuorum,
+  }
+
+  // Retroactive G1 scoring (02 §6.2): once a trap storm is observed, every APPROVING juror
+  // (the honest voters, here) is scored down against the G1 outcome. This is the seam: a
+  // "reversible" deopt storm becomes an IRREVERSIBLE weight move — with NO corroboration.
+  action g1Score: bool = all {
+    deoptStorm >= STORM_LIMIT,
+    weight' = weight.keys().mapBy(a =>
+      if (a.in(honest)) maxInt(0, weight.get(a) - G1_PENALTY) else weight.get(a)),
+    status' = status, findings' = findings, deoptStorm' = deoptStorm,
+    lastSlashCorroborators' = lastSlashCorroborators,
+    lastQuarantinePassedQuorum' = lastQuarantinePassedQuorum,
+  }
+
   // temporary stutter so the module typechecks/tests before step is built (Task 6).
   action idle = all {
     weight' = weight, status' = status, findings' = findings, deoptStorm' = deoptStorm,
