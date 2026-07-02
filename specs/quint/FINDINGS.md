@@ -37,6 +37,11 @@ with every prior task report in this suite).
 modules (`base.qnt`, `budgets.qnt`, `consensus.qnt`, `mailbox.qnt`, `reputation.qnt`,
 `state_model.qnt`, plus `smoke.qnt` — 7 files) typecheck cleanly. No `[QNT...]` output.
 
+**_Update (sentinel.qnt, Task 9, captured 2026-07-02 at commit `caa0bb2`):_** re-run after
+`sentinel.qnt` was added — exit code 0, all 7 verified modules (`base.qnt`, `budgets.qnt`,
+`consensus.qnt`, `mailbox.qnt`, `reputation.qnt`, `sentinel.qnt`, `state_model.qnt`, plus
+`smoke.qnt` — 8 files) typecheck cleanly. No `[QNT...]` output.
+
 ### 1.2 `mise run quint-test`
 
 Exit code 0. **30 test-invocations passing, 0 failing**, across 6 files (22 unique scenarios
@@ -58,6 +63,14 @@ test-invocations passing, 0 failing**, across 7 files (25 unique scenarios).
 | Module | Passing | Breakdown |
 |---|---|---|
 | reputation.qnt | 5 | (2 inherited) + chronicDriftReachesFloorTest, blocDefangedTest, honestAnchorSurvivesTest |
+
+**_Update (sentinel.qnt, Task 9, captured 2026-07-02 at commit `caa0bb2`):_** re-run after
+`sentinel.qnt` was added — exit code 0, **42 test-invocations passing, 0 failing**, across 8
+files (30 unique scenarios).
+
+| Module | Passing | Breakdown |
+|---|---|---|
+| sentinel.qnt | 7 | (2 inherited) + singleFindingInertTest, soundSlashReachableTest, blocCaptureTest, slashThenQuarantineTest, g1LaunderingTest |
 
 ### 1.3 `mise run quint-verify` (Apalache 0.47.2, bounded model checking)
 
@@ -87,6 +100,35 @@ Ran in the **background**, foreground-polled to completion (not backgrounded-and
 | 7 | `state_model.qnt` `[step=taskStep, max-steps=4]` | taskDagAcyclic, blockedTaskSafety | 4 | **NoError** | 8.0s |
 
 **Result (Task 8): every module — all 7, including the new `reputation.qnt` — is green at its declared (possibly bounded) depth. No STOP condition was hit; `verify.sh` ran under `set -euo pipefail` to completion. The suite gate is fully passing.**
+
+**_Update (sentinel.qnt, Task 9, captured 2026-07-02 at commit `caa0bb2`):_** the full 8-pass,
+7-verified-module gate (this report's prior 7 passes across 6 modules plus the new
+`sentinel.qnt`) was re-run to completion, foreground-polled under `set -euo pipefail`, all
+passes verbatim `[ok] No violation found`, total wall clock **34m7.460s** (`real 34m7.460s`
+from the captured run). This run used **Apalache 0.56.1** (build `70cdaf4`) rather than the
+0.47.2 in this section's header — the toolchain was upgraded (commit `1c9473d`, "upgrade
+qint") between the Task 8 run and this one; no invariant, depth, or outcome changed as a
+result. `sentinel.qnt` alone accounted for **845.7s (≈14m6s)** of the total, the second most
+expensive single pass in the suite after `reputation.qnt`'s `swingResistance` fixture. The
+other six modules' individual timings shifted (normal run-to-run variance plus the toolchain
+upgrade — same bounded depths, same `[ok]` outcome for all) — updated below; no invariant,
+depth, or outcome changed for any of the seven prior modules.
+
+| # | Pass | Invariants | Depth | Outcome | Wall time (Task 9 re-run) |
+|---|---|---|---|---|---|
+| 1 | `budgets.qnt` | stockNeverExceedsCap, childFloorsFitParent, kernelFloorAvailable, bucketWithinCapacity, layeredStopOrdering, notifierIsOffBudget | default (reached step 10) | **NoError** | 135.7s |
+| 2 | `consensus.qnt` `[max-steps=10]` | proposerNotDisposer, verifyBeforeVote, refutedNeverCommits, quorumAndThreshold, noAutonomousLowCoverageHighBlast, mechanicalTiering, breakGlassOnlyOnDeadlock | 10 | **NoError** | 42.1s |
+| 3 | `mailbox.qnt` `[max-steps=6]` | corrInjective, answerClearsOwnNode, gatingConsistent, bindingIs1to1, precedenceNoDeadlock | 6 | **NoError** | 26.9s |
+| 4 | `reputation.qnt` (no explicit `max-steps` override; `# VERIFY:` header only) | weightBounded, driftDecaysWeight, swingResistance | default (reached step 10) | **NoError** | 948.3s (≈15.8 min) |
+| 5 | `sentinel.qnt` (no explicit `max-steps` override; `# VERIFY:` header only) | weightBounded, slashRequiresCorroboration, quarantineRequiresQuorum | default (reached step 10) | **NoError** | 845.7s (≈14.1 min) |
+| 6 | `smoke.qnt` | nonNegative | default | **NoError** | 4.1s |
+| 7 | `state_model.qnt` (default step) | headReachable, linearSpine, gapFreeTime, constitutionalIffKernel, constitutionalFlagHonest | default (reached step 10) | **NoError** | 27.3s |
+| 8 | `state_model.qnt` `[step=taskStep, max-steps=4]` | taskDagAcyclic, blockedTaskSafety | 4 | **NoError** | 8.3s |
+
+**Result (Task 9): every module — all 7 verified modules (8 `.qnt` files including `base.qnt`),
+including the new `sentinel.qnt` — is green at its declared (possibly bounded) depth. No STOP
+condition was hit; `verify.sh` ran under `set -euo pipefail` to completion. The suite gate is
+fully passing.**
 
 (Benign `io.netty`/gRPC/HTTP2 stack-trace noise appears throughout the log — this is Apalache's local gRPC health-check probe failing harmlessly on shutdown, documented as expected in every prior task report and the README; it does not affect the `NoError` outcomes above.)
 
@@ -178,21 +220,35 @@ Columns: `Invariant | Spec §` | `Method` | `Result` | `Note`. Grouped by module
 | blocDefangedTest | `00` §6 / ROB-01 / ROB-02 (non-vacuity witness for `swingResistance`) | scenario | holds | Drives the WHOLE bloc `{1,2,3,4}` past `DRIFT_LIMIT` (12 `observeWrong` actions), then asserts `swingResistance` holds over a genuinely, non-vacuously tainted council. |
 | honestAnchorSurvivesTest | design doc §Fixture rationale (honest anchor `{5}` keeps `totalWeight > 0`, avoiding the degenerate full-capture case) | scenario | holds | Agent 5, observed right, retains `>= START` weight while bloc agents 1 and 2 drift — `swingResistance` is never checked against a degenerate zero-weight council. |
 
-### 2.7 smoke.qnt (toolchain scaffold — no spec §, infra only)
+### 2.7 sentinel.qnt (`07`/`08` — Sentinel→reputation gate; ROB-06 re-check)
+
+| Invariant / Test | Spec § | Method | Result | Note |
+|---|---|---|---|---|
+| weightBounded | `08` §3.3 (reputation weight domain) | MC | holds | integer proxy in [0,CAP] |
+| slashRequiresCorroboration | `07` §5.9 / `08` §3.6 (k-of-n before weight moves) | MC | holds | ROB-06 acceptance box #1 — the literal fix is correct |
+| quarantineRequiresQuorum | `08` §3.6 (Worker quarantine = ordinary ⅔) | MC | holds | guard is correct; quorum is manufacturable (ROB-12) |
+| singleFindingInertTest | `07` §3.3 (a lone finding is inert) | scenario | holds | ROB-06's literal guarantee |
+| soundSlashReachableTest | `07` §5.9 (corroborated slash exists) | scenario | holds | non-vacuity witness for slashRequiresCorroboration |
+| blocCaptureTest | ROB-06 / ROB-11 | scenario | **attack reachable** | correlated Sentinel bloc → faction supermajority; gate not violated |
+| slashThenQuarantineTest | ROB-06 / ROB-12 | scenario | **attack reachable** | honest voter quarantined by manufactured quorum |
+| g1LaunderingTest | ROB-06 / ROB-13 | scenario | **attack reachable** | single Sentinel moves weight via emergency-deopt→G1; no slash, gate intact |
+
+### 2.8 smoke.qnt (toolchain scaffold — no spec §, infra only)
 
 | Invariant / Test | Spec § | Method | Result | Note |
 |---|---|---|---|---|
 | nonNegative | — (toolchain smoke test) | MC | holds | Proves the pinned Quint/Apalache toolchain runs end-to-end. |
 | countsUpTest | — | scenario | holds | |
 
-**Row count: 54** (29 MC invariant rows + 25 scenario/sim rows) across all 6 verified modules
-plus `base`'s 2 imported scenarios — was 48 before Task 8 added `reputation.qnt`'s 3 MC
-invariant rows + 3 scenario rows (was 46 before the §9 follow-up added two consensus
+**Row count: 62** (32 MC invariant rows + 30 scenario/sim rows) across all 7 verified modules
+plus `base`'s 2 imported scenarios — was 54 before Task 9 added `sentinel.qnt`'s 3 MC
+invariant rows + 5 scenario rows (was 48 before Task 8 added `reputation.qnt`'s 3 MC
+invariant rows + 3 scenario rows, and 46 before the §9 follow-up added two consensus
 deadlock-gating scenarios).
 
 ---
 
-## 3. Headline findings — plan-code bugs the model surfaced (F1-F6)
+## 3. Headline findings — plan-code bugs the model surfaced (F1-F7)
 
 F1-F5 are the suite's original core value: real bugs in the plan's Quint transcription, each
 caught by Apalache returning a genuine counterexample, each fixed with a minimal, documented
@@ -288,6 +344,39 @@ ROB-02 — ROB-02 is the *undetected/novel* correlated-failure risk, ROB-10 is t
 *detected/already-priced* drift case, where down-weighting is happening but is not
 automatically calibrated to defang the bloc). See §4 for the spec-gap judgment.
 
+**F7 (added Task 9) is a re-check finding, not a bug catch, in the same vein as F6** — the
+shipped `sentinel.qnt` module is correct as written; the finding is that a correctly-enforced
+direct guard does not by itself close the broader threat.
+
+**F7 — sentinel.qnt, ROB-06 re-check: guard confirmed correct, three indirect bypasses each
+demonstrated reachable (Task 9).** ROB-06 was originally filed against a single, direct
+failure mode: one uncorroborated Sentinel finding moving reputation weight on its own. The
+model confirms that direct path is closed as designed — `slashRequiresCorroboration` (k-of-n
+corroboration required before weight moves) and `quarantineRequiresQuorum` (Worker quarantine
+requires an ordinary ⅔) both `hold`, and both are exercised non-vacuously
+(`singleFindingInertTest` witnesses the inert lone-finding case; `soundSlashReachableTest`
+witnesses that a genuinely corroborated slash is still reachable — the guard is not so strict
+it never fires). **No guard-code bug exists here, unlike F1-F5.** What the re-check surfaced
+instead is that a correct direct guard does not close the subsystem: three **indirect**
+routes reach the same bad outcomes without ever tripping it, each pinned by an attack-witness
+scenario (§2.7): (1) **`blocCaptureTest` / ROB-11** — a correlated bloc of Sentinels can
+manufacture a faction supermajority through ordinary voting weight, no single Sentinel
+over-acting and no slash guard engaged; (2) **`slashThenQuarantineTest` / ROB-12** — an
+honest Worker can be quarantined by a manufactured ordinary-⅔ quorum even though
+`quarantineRequiresQuorum`'s own guard logic is correct — the guard checks the quorum is real,
+not that the quorum is honest; (3) **`g1LaunderingTest` / ROB-13** — a single Sentinel can move
+reputation weight through an emergency-deopt-to-G1 path that bypasses the slash mechanism
+entirely, so `slashRequiresCorroboration` is never even engaged. Two further findings from the
+same re-check are prose-only, needing no Quint counterexample to state — **ROB-14** and
+**ROB-15** — the embargo-counter leak and the under-declare evasion. Issue numbers ROB-11
+through ROB-15 are reserved for these five findings; **filing the standalone
+`specs/issues/ROB-11...15-*.md` files is out of this task's scope** (this task modifies only
+`FINDINGS.md` — the module + README + FINDINGS trio, matching the `reputation.qnt` addition's
+own additive-only convention) and is left for a follow-up filing pass, consistent with how
+`ROB-09`/`ROB-10` were filed as a dedicated step in their own originating tasks. Method: MC
+(the three invariants, all `[ok]`, §1.3/§2.7) + scenario (5 runs, 3 of them attack witnesses).
+See §4 for the spec-gap judgment on ROB-11/12/13/14/15.
+
 ---
 
 ## 4. Spec-gap judgment and issue filing
@@ -350,8 +439,27 @@ artifact in this Quint suite's own plan code (now fixed, no prose defect)?
   ROB-02's mitigation (measured decorrelation) does not address ROB-10; it is a precondition on
   the decay dynamics themselves.
 
+- **F7 (Task 9) — NOT a spec-prose gap for the direct guard itself; the three indirect
+  bypasses are re-check refinements of the existing ROB-06 threat model, not evidence the
+  guard's own literal prose requirement was mistranscribed.** The direct-path guard the prose
+  actually specifies (`07` §5.9 / `08` §3.6 corroboration-before-weight-move) is correctly
+  transcribed and correctly enforced — `slashRequiresCorroboration` and
+  `quarantineRequiresQuorum` both `hold`, non-vacuously (§2.7) — so, like F1-F4, there is no
+  guard-code bug and no prose defect in the narrow claim the guard makes. What ROB-11/12/13
+  show is that the **prose's implicit scope** (guarding the *direct* slash/quarantine action)
+  is narrower than the **threat** ROB-06 was filed to close (an attacker moving reputation
+  weight or quarantine status by any means) — a framing gap one level up from the guard itself,
+  not a mistranscription of it. ROB-06 (`specs/issues/ROB-06-sentinel-consensus-sidedoor.md`,
+  already `status: resolved`) is **not edited by this task** — it already documents the
+  corroboration requirement this re-check confirms. The five new findings (ROB-11/12/13 as
+  reachable-witness bypass paths, ROB-14/15 as prose-only observations from the same read) are
+  refinements of ROB-06's threat model rather than independent findings against a different
+  prose claim; their issue numbers are reserved but **filing the standalone
+  `specs/issues/ROB-11...15-*.md` files is out of this task's scope** (FINDINGS.md-only, see
+  §3's F7 note) and left for a follow-up pass.
+
 No other `violated`/`caveat` rows exist in the final suite (all rows in §2 are `holds`),
-so F1-F6 are the complete set of judged findings.
+so F1-F7 are the complete set of judged findings.
 
 ---
 
