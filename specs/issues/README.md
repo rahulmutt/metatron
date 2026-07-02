@@ -39,6 +39,12 @@ Each issue was produced by a per-spec reviewer, **steelmanned by a skeptic** (ve
 | [ROB-07](./ROB-07-reversibility-classifier-undefined.md) | high | Blast-radius reversibility classifier is undefined yet gates autonomy |
 | [ROB-08](./ROB-08-audit-arg-digest-only.md) | medium | Audit records only an arg-digest, defeating forensics |
 | [ROB-09](./ROB-09-mailbox-safe-hold-multigate.md) | high | Mailbox does not state that a node's Blocked state is the conjunction of all its gating Questions |
+| [ROB-10](./ROB-10-reputation-decay-threshold-coupling.md) | medium | Reputation's "decay to zero influence" claim is silent on the quantitative decay-rate / consensus-threshold coupling |
+| [ROB-11](./ROB-11-sentinel-corroboration-independence.md) | high | k-of-n Sentinel corroboration has no independence requirement |
+| [ROB-12](./ROB-12-slash-quarantine-composition.md) | high | Slash-then-quarantine composes into honest-voter eviction |
+| [ROB-13](./ROB-13-emergency-deopt-g1-laundering.md) | high | Emergency deopt launders a single Sentinel's opinion into vote weight via G1 |
+| [ROB-14](./ROB-14-embargo-votes-total-leak.md) | medium | Blind-vote embargo omits the consensus.votes_total counter |
+| [ROB-15](./ROB-15-under-declare-telemetry-evasion.md) | medium | Under-declaring telemetry capability is a blessed detection-evasion path |
 
 ### Usability — can a competent engineer hold the model in their head?
 

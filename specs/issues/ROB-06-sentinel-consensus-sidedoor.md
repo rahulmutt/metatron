@@ -36,7 +36,11 @@ that can drift or be subverted.
 
 - [ ] A single Sentinel finding cannot, by itself, change vote weight.
 - [ ] Auto-ratified Sentinel emergency authority is bounded to reversible actions.
-- [ ] The "no single agent swings consensus" invariant is re-checked against this path.
+- [x] The "no single agent swings consensus" invariant is re-checked against this path.
+      Re-checked formally in `specs/quint/sentinel.qnt`: the direct path is confirmed
+      (all three well-formedness invariants hold — no guard bug), and the re-check surfaced
+      three indirect bypass paths, filed as ROB-11 (corroboration independence), ROB-12
+      (slash→quarantine composition), and ROB-13 (emergency-deopt G1 laundering).
 - [ ] Related: OE-05 (reputation as weight), ROB-01 (drift detection).
 
 ## Resolution
