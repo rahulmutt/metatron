@@ -66,7 +66,9 @@ test-invocations passing, 0 failing**, across 7 files (25 unique scenarios).
 
 **_Update (sentinel.qnt, Task 9, captured 2026-07-02 at commit `caa0bb2`):_** re-run after
 `sentinel.qnt` was added — exit code 0, **42 test-invocations passing, 0 failing**, across 8
-files (30 unique scenarios).
+files (30 unique scenarios) (the `base.qnt` (2) and `budgets.qnt` (6) per-module counts are
+carried forward from their earlier capture above rather than re-captured with explicit `==`
+headers in this run's log; the total of 42 is arithmetically consistent with them).
 
 | Module | Passing | Breakdown |
 |---|---|---|
@@ -351,9 +353,10 @@ direct guard does not by itself close the broader threat.
 **F7 — sentinel.qnt, ROB-06 re-check: guard confirmed correct, three indirect bypasses each
 demonstrated reachable (Task 9).** ROB-06 was originally filed against a single, direct
 failure mode: one uncorroborated Sentinel finding moving reputation weight on its own. The
-model confirms that direct path is closed as designed — `slashRequiresCorroboration` (k-of-n
-corroboration required before weight moves) and `quarantineRequiresQuorum` (Worker quarantine
-requires an ordinary ⅔) both `hold`, and both are exercised non-vacuously
+model confirms that direct path is closed as designed — `weightBounded` (the reputation-weight
+domain invariant), `slashRequiresCorroboration` (k-of-n corroboration required before weight
+moves), and `quarantineRequiresQuorum` (Worker quarantine requires an ordinary ⅔) all `hold`,
+and the latter two are exercised non-vacuously
 (`singleFindingInertTest` witnesses the inert lone-finding case; `soundSlashReachableTest`
 witnesses that a genuinely corroborated slash is still reachable — the guard is not so strict
 it never fires). **No guard-code bug exists here, unlike F1-F5.** What the re-check surfaced
@@ -369,11 +372,14 @@ reputation weight through an emergency-deopt-to-G1 path that bypasses the slash 
 entirely, so `slashRequiresCorroboration` is never even engaged. Two further findings from the
 same re-check are prose-only, needing no Quint counterexample to state — **ROB-14** and
 **ROB-15** — the embargo-counter leak and the under-declare evasion. Issue numbers ROB-11
-through ROB-15 are reserved for these five findings; **filing the standalone
-`specs/issues/ROB-11...15-*.md` files is out of this task's scope** (this task modifies only
-`FINDINGS.md` — the module + README + FINDINGS trio, matching the `reputation.qnt` addition's
-own additive-only convention) and is left for a follow-up filing pass, consistent with how
-`ROB-09`/`ROB-10` were filed as a dedicated step in their own originating tasks. Method: MC
+through ROB-15 were reserved for these five findings and **have since been filed as standalone
+issues** — `specs/issues/ROB-11-sentinel-corroboration-independence.md`,
+`ROB-12-slash-quarantine-composition.md`, `ROB-13-emergency-deopt-g1-laundering.md`,
+`ROB-14-embargo-votes-total-leak.md`, and `ROB-15-under-declare-telemetry-evasion.md` (all
+`status: open`), consistent with how `ROB-09`/`ROB-10` were filed as a dedicated step in their
+own originating tasks. ROB-06's own third acceptance box ("the 'no single agent swings
+consensus' invariant is re-checked against this path") is now ticked, citing this re-check and
+these five filings. Method: MC
 (the three invariants, all `[ok]`, §1.3/§2.7) + scenario (5 runs, 3 of them attack witnesses).
 See §4 for the spec-gap judgment on ROB-11/12/13/14/15.
 
@@ -450,13 +456,13 @@ artifact in this Quint suite's own plan code (now fixed, no prose defect)?
   is narrower than the **threat** ROB-06 was filed to close (an attacker moving reputation
   weight or quarantine status by any means) — a framing gap one level up from the guard itself,
   not a mistranscription of it. ROB-06 (`specs/issues/ROB-06-sentinel-consensus-sidedoor.md`,
-  already `status: resolved`) is **not edited by this task** — it already documents the
-  corroboration requirement this re-check confirms. The five new findings (ROB-11/12/13 as
-  reachable-witness bypass paths, ROB-14/15 as prose-only observations from the same read) are
-  refinements of ROB-06's threat model rather than independent findings against a different
-  prose claim; their issue numbers are reserved but **filing the standalone
-  `specs/issues/ROB-11...15-*.md` files is out of this task's scope** (FINDINGS.md-only, see
-  §3's F7 note) and left for a follow-up pass.
+  `status: resolved`) already documents the corroboration requirement this re-check confirms;
+  its third acceptance box (the re-check itself) is now ticked, citing `sentinel.qnt` and the
+  five findings below. The five new findings (ROB-11/12/13 as reachable-witness bypass paths,
+  ROB-14/15 as prose-only observations from the same read) are refinements of ROB-06's threat
+  model rather than independent findings against a different prose claim; they are **filed as
+  standalone issues** — `specs/issues/ROB-11-sentinel-corroboration-independence.md` through
+  `ROB-15-under-declare-telemetry-evasion.md` (all `status: open`) — see §3's F7 note.
 
 No other `violated`/`caveat` rows exist in the final suite (all rows in §2 are `holds`),
 so F1-F7 are the complete set of judged findings.

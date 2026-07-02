@@ -49,9 +49,12 @@ break-glass/ROB-04 territory and out of scope here.
 **Abstraction note (`sentinel.qnt`):** ground-truth guilt is the empty set and the one
 honest Sentinel `{103}` only ever targets the guilty, so the honest-Sentinel and G0 paths
 never fire in the adversarial `step` — deliberately isolating "can the compromised path move
-weight without a sound justification?". Those paths are kept non-vacuous by dedicated
-witnesses (`singleFindingInertTest`, `soundSlashReachableTest`). Sentinel ids are offset
-10x from council ids so the two id spaces never alias in the `findings` pair set.
+weight without a sound justification?". The corroborated-slash path and the inert-lone-finding
+property are kept non-vacuous by dedicated witnesses (`singleFindingInertTest`,
+`soundSlashReachableTest`); the G0 oracle / honest-Sentinel `raiseFinding` branch is present
+as a structural sound-path but is deliberately never exercised by model-checking or any test
+in this adversarial fixture (guilty = {}). Sentinel ids are offset 10x from council ids so
+the two id spaces never alias in the `findings` pair set.
 
 `smoke.qnt` is scaffolding for this task only: it proves the pinned toolchain
 (typecheck / test / Apalache verify) actually runs end-to-end before any real subsystem
