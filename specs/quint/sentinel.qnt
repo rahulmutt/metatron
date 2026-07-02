@@ -164,11 +164,24 @@ module sentinel {
     lastQuarantinePassedQuorum' = lastQuarantinePassedQuorum,
   }
 
-  // temporary stutter so the module typechecks/tests before step is built (Task 6).
+  // stutter step: no state changes.
   action idle = all {
     weight' = weight, status' = status, findings' = findings, deoptStorm' = deoptStorm,
     lastSlashCorroborators' = lastSlashCorroborators,
     lastQuarantinePassedQuorum' = lastQuarantinePassedQuorum,
   }
-  action step = idle
+
+  // The adversary's move set. sBloc may raise findings on anyone and self-corroborate;
+  // honest sentinel only on the (empty) guilty set; slashes, quarantines, deopts, G1
+  // scoring, and idle are all enabled per their guards.
+  action step = any {
+    nondet s = sBloc.union(sHonest).oneOf()
+      nondet a = council.oneOf() raiseFinding(s, a),
+    nondet a = council.oneOf() corroboratedSlash(a),
+    nondet a = council.oneOf() g0Slash(a),
+    nondet a = council.oneOf() quarantine(a),
+    nondet s = sBloc.union(sHonest).oneOf() emergencyDeopt(s),
+    g1Score,
+    idle,
+  }
 }
