@@ -14,7 +14,7 @@ review_verdict: MODEL-SURFACED
 
 **Open.** Surfaced by formal modeling (Quint suite `specs/quint/reputation.qnt`, Task 6
 falsifiability probe), not by the original adversarial spec review. No prose change has
-been applied yet; the suggested clarification below is proposed for `00 §6.4` / `08 §3.3`
+been applied yet; the suggested clarification below is proposed for `00 §6` (principle 4) / `08 §3.3`
 and cross-referenced from ROB-03.
 
 ## What the model found
@@ -100,7 +100,7 @@ it is a precondition on the decay dynamics themselves.
 
 ## Suggested resolution
 
-State the decay-rate precondition alongside the qualitative claim, in `00 §6.4` (or
+State the decay-rate precondition alongside the qualitative claim, in `00 §6` (principle 4) (or
 wherever the reputation dynamics are normatively tuned) and cross-referenced from ROB-03:
 the "decays toward zero influence" guarantee is conditional on the per-round decay being
 fast enough — relative to the ⅔/¾ pass thresholds and the drift-detection lag — that a

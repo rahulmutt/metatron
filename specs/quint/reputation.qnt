@@ -81,7 +81,9 @@ module reputation {
   // claim). Checked against base.passesOrdinary — the SAME predicate consensus.qnt's
   // `decide` uses — so the swing test and the live threshold cannot silently diverge.
   // Reasons in ABSOLUTE threshold terms, so a too-slow DECAY (which merely raises the
-  // derived DRIFT_WEIGHT_CAP) is caught here as a reachable counterexample (Task 6).
+  // derived DRIFT_WEIGHT_CAP) is a reachable counterexample — but only PAST the default
+  // BMC depth (~20 steps), so the default-depth gate does NOT catch it; shown via a
+  // concrete witness instead (Task 6; see FINDINGS §5 / ROB-10).
   val swingResistance = not(passesOrdinary(taintedWeight, totalWeight))
 
   // --- scenarios ---
