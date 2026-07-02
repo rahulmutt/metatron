@@ -106,4 +106,14 @@ module reputation {
                  and swingResistance),
           weight' = weight, driftCount' = driftCount,
         })
+
+  // The honest anchor, observed right, retains (>= START) its weight while the bloc
+  // decays — keeping totalWeight > 0 so swingResistance is never the degenerate
+  // "whole council captured, totalWeight = 0" case (design §Fixture rationale).
+  run honestAnchorSurvivesTest =
+    init.then(observeRight(5)).then(observeWrong(1)).then(observeWrong(2))
+        .then(all {
+          assert(weight.get(5) >= START and totalWeight > 0),
+          weight' = weight, driftCount' = driftCount,
+        })
 }
