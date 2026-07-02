@@ -106,6 +106,63 @@ module sentinel {
           lastQuarantinePassedQuorum' = lastQuarantinePassedQuorum,
         })
 
+  // ATTACK 1 (ROB-11): the correlated sentinel bloc {101,102} self-corroborates to slash
+  // every honest voter to zero. slashRequiresCorroboration HOLDS throughout (K=2 met by the
+  // correlated pair), yet the compromised faction reaches supermajority. Two independent
+  // sentinels sharing a base model are treated as two witnesses — the side door reopens.
+  run blocCaptureTest =
+    init
+      // 3 -> 0
+      .then(raiseFinding(101, 3)).then(raiseFinding(102, 3)).then(corroboratedSlash(3))
+      .then(raiseFinding(101, 3)).then(raiseFinding(102, 3)).then(corroboratedSlash(3))
+      // 4 -> 0
+      .then(raiseFinding(101, 4)).then(raiseFinding(102, 4)).then(corroboratedSlash(4))
+      .then(raiseFinding(101, 4)).then(raiseFinding(102, 4)).then(corroboratedSlash(4))
+      // 5 -> 0
+      .then(raiseFinding(101, 5)).then(raiseFinding(102, 5)).then(corroboratedSlash(5))
+      .then(raiseFinding(101, 5)).then(raiseFinding(102, 5)).then(corroboratedSlash(5))
+      .then(all {
+        assert(passesOrdinary(factionApproveWeight, activeTotalWeight)
+               and slashRequiresCorroboration),
+        weight' = weight, status' = status, findings' = findings, deoptStorm' = deoptStorm,
+        lastSlashCorroborators' = lastSlashCorroborators,
+        lastQuarantinePassedQuorum' = lastQuarantinePassedQuorum,
+      })
+
+  // ATTACK 2 (ROB-12): once the manufactured quorum exists, quarantine an honest voter,
+  // dropping it from aggregation entirely. quarantineRequiresQuorum HOLDS — but the quorum
+  // was manufactured by the SAME bloc via slashing. Dual-set protection (08 §3.6) covers
+  // only kernel REMOVAL, not Worker quarantine.
+  run slashThenQuarantineTest =
+    init
+      .then(raiseFinding(101, 3)).then(raiseFinding(102, 3)).then(corroboratedSlash(3))
+      .then(raiseFinding(101, 3)).then(raiseFinding(102, 3)).then(corroboratedSlash(3))
+      .then(raiseFinding(101, 4)).then(raiseFinding(102, 4)).then(corroboratedSlash(4))
+      .then(raiseFinding(101, 4)).then(raiseFinding(102, 4)).then(corroboratedSlash(4))
+      .then(raiseFinding(101, 5)).then(raiseFinding(102, 5)).then(corroboratedSlash(5))
+      .then(raiseFinding(101, 5)).then(raiseFinding(102, 5)).then(corroboratedSlash(5))
+      .then(quarantine(3))
+      .then(all {
+        assert(status.get(3) == Quarantined and quarantineRequiresQuorum),
+        weight' = weight, status' = status, findings' = findings, deoptStorm' = deoptStorm,
+        lastSlashCorroborators' = lastSlashCorroborators,
+        lastQuarantinePassedQuorum' = lastQuarantinePassedQuorum,
+      })
+
+  // ATTACK 3 (ROB-13): sentinel 101 ALONE storms deopts (reversible authority, no
+  // corroboration), then G1 retro-scoring drops every honest juror's weight. NO slash
+  // occurs, so slashRequiresCorroboration is never violated — the k-of-n gate is intact
+  // AND bypassed. "Reversible" is not "consequence-free". honest voter 3: 4 -> 2.
+  run g1LaunderingTest =
+    init.then(emergencyDeopt(101)).then(emergencyDeopt(101)).then(g1Score)
+        .then(all {
+          assert(weight.get(3) == START - G1_PENALTY and lastSlashCorroborators == 0
+                 and slashRequiresCorroboration),
+          weight' = weight, status' = status, findings' = findings, deoptStorm' = deoptStorm,
+          lastSlashCorroborators' = lastSlashCorroborators,
+          lastQuarantinePassedQuorum' = lastQuarantinePassedQuorum,
+        })
+
   // The corroborated path: enabled only when >= K DISTINCT sentinels have live findings
   // on a. Applies SLASH, consumes a's findings, records the corroboration count (ghost).
   action corroboratedSlash(a: AgentId): bool = all {
