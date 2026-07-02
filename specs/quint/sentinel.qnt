@@ -1,4 +1,4 @@
-// # VERIFY: weightBounded, slashRequiresCorroboration
+// # VERIFY: weightBounded, slashRequiresCorroboration, quarantineRequiresQuorum
 module sentinel {
   import base.* from "./base"
 
@@ -63,6 +63,12 @@ module sentinel {
   val slashRequiresCorroboration =
     lastSlashCorroborators == 0 or lastSlashCorroborators >= K
 
+  // ROB-06 acceptance box #2's sibling on the EVICTION path: a quarantine fires only when
+  // the faction can carry an ordinary (2/3) TypedDiff. Expected to HOLD — the finding
+  // (ROB-12) is that the quorum itself is manufacturable, not that this guard is buggy.
+  val quarantineRequiresQuorum =
+    lastQuarantinePassedQuorum or council.forall(a => status.get(a) == Active)
+
   // ROB-06's literal guarantee: a lone finding moves no weight and evicts no voter.
   run singleFindingInertTest =
     init.then(raiseFinding(101, 3))
@@ -121,6 +127,19 @@ module sentinel {
     lastSlashCorroborators' = K,   // G0 adjudication is treated as fully-authorized
     status' = status, deoptStorm' = deoptStorm,
     lastQuarantinePassedQuorum' = lastQuarantinePassedQuorum,
+  }
+
+  // Ordinary (2/3) quarantine of a Worker-grade voter (08 §3.6): enabled iff the faction's
+  // Active approve weight passes passesOrdinary over the Active total. Drops a from
+  // aggregation. Checked against base.passesOrdinary — the SAME predicate decide uses.
+  action quarantine(a: AgentId): bool = all {
+    a.in(council),
+    status.get(a) == Active,
+    passesOrdinary(factionApproveWeight, activeTotalWeight),
+    status' = status.set(a, Quarantined),
+    lastQuarantinePassedQuorum' = true,
+    weight' = weight, findings' = findings, deoptStorm' = deoptStorm,
+    lastSlashCorroborators' = lastSlashCorroborators,
   }
 
   // temporary stutter so the module typechecks/tests before step is built (Task 6).
