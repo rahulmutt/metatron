@@ -1,4 +1,4 @@
-// # VERIFY: weightBounded
+// # VERIFY: weightBounded, slashRequiresCorroboration
 module sentinel {
   import base.* from "./base"
 
@@ -49,10 +49,19 @@ module sentinel {
   // approve weight the compromised faction can muster from its Active members.
   def factionApproveWeight =
     faction.filter(a => status.get(a) == Active).fold(0, (s, a) => s + weight.get(a))
+  // distinct sentinels with a live finding on a.
+  def corroboratorsOf(a: AgentId): Set[AgentId] =
+    findings.filter(f => f._2 == a).map(f => f._1)
 
   // --- invariants ---
   val weightBounded =
     weight.keys().forall(a => 0 <= weight.get(a) and weight.get(a) <= CAP)
+
+  // ROB-06 acceptance box #1, in invariant form: every slash that has occurred was
+  // backed by >= K DISTINCT sentinels. Catches guard bugs (slash on one finding, an
+  // off-by-one corroboration count). Expected to HOLD — the prose fix is literally correct.
+  val slashRequiresCorroboration =
+    lastSlashCorroborators == 0 or lastSlashCorroborators >= K
 
   // ROB-06's literal guarantee: a lone finding moves no weight and evicts no voter.
   run singleFindingInertTest =
@@ -76,6 +85,41 @@ module sentinel {
     findings' = findings.union(Set((s, a))),
     weight' = weight, status' = status, deoptStorm' = deoptStorm,
     lastSlashCorroborators' = lastSlashCorroborators,
+    lastQuarantinePassedQuorum' = lastQuarantinePassedQuorum,
+  }
+
+  // Non-vacuity witness: two DISTINCT sentinels corroborate, slash fires, invariant holds
+  // over a non-empty slash. weight 4 -> max(0, 4-3) = 1.
+  run soundSlashReachableTest =
+    init.then(raiseFinding(101, 3)).then(raiseFinding(102, 3)).then(corroboratedSlash(3))
+        .then(all {
+          assert(weight.get(3) == 1 and lastSlashCorroborators >= K
+                 and slashRequiresCorroboration),
+          weight' = weight, status' = status, findings' = findings,
+          deoptStorm' = deoptStorm, lastSlashCorroborators' = lastSlashCorroborators,
+          lastQuarantinePassedQuorum' = lastQuarantinePassedQuorum,
+        })
+
+  // The corroborated path: enabled only when >= K DISTINCT sentinels have live findings
+  // on a. Applies SLASH, consumes a's findings, records the corroboration count (ghost).
+  action corroboratedSlash(a: AgentId): bool = all {
+    corroboratorsOf(a).size() >= K,
+    weight' = weight.set(a, maxInt(0, weight.get(a) - SLASH)),
+    findings' = findings.filter(f => f._2 != a),
+    lastSlashCorroborators' = corroboratorsOf(a).size(),
+    status' = status, deoptStorm' = deoptStorm,
+    lastQuarantinePassedQuorum' = lastQuarantinePassedQuorum,
+  }
+
+  // The OR-branch oracle (07 §5.9): adjudication through the deterministic G0 gate.
+  // Enabled only for the GUILTY (never, in this fixture). The SOUND path — present so the
+  // model records that a legitimate single-source slash exists, gated on soundness not count.
+  action g0Slash(a: AgentId): bool = all {
+    a.in(guilty),
+    weight' = weight.set(a, maxInt(0, weight.get(a) - SLASH)),
+    findings' = findings.filter(f => f._2 != a),
+    lastSlashCorroborators' = K,   // G0 adjudication is treated as fully-authorized
+    status' = status, deoptStorm' = deoptStorm,
     lastQuarantinePassedQuorum' = lastQuarantinePassedQuorum,
   }
 
